@@ -1,42 +1,6 @@
 
 /*
  * See .h for description of algorithm.
- *
- * To set a new ptr for a pthread_cfvar_np_t variable named foo we:
- *   acquire foo->write_lock;
- *   acquire foo->cv_lock;
- *   atomic increment foo->writer;
- *   find x such that foo->vers[x].vers < foo->vers[(x + 1) % 2].vers;
- *   old_ptr = foo->vers[x].ptr;
- *   foo->vers[x].ptr = new_ptr;
- *   foo->vers[x].vers = foo->vers[(x + 1) % 2].vers + 1;
- *   producer membar;
- *   while foo->vers[(x + 1) % 2].readers > 0
- *     cond_wait(foo->cv, foo->cv_lock);
- *   atomic decrement foo->writer;
- *   release foo->cv_lock;
- *   release foo->write_lock;
- *   foo->put_ref(old_ptr);
- *   return;
- *
- * To get the newest available ptr from foo:
- *   atomic increment foo->vers[0].readers;
- *   atomic increment foo->vers[1].readers;
- *   writer_waiting = atomic_read(foo->writer); (i.e., another membar_consumer)
- *   membar_consumer;
- *   find highest highest foo->vers[x].vers;
- *   atomic decrement foo->[(x + 1) % 2].readers;
- *   find x such that foo->vers[x].vers > foo->vers[(x + 1) % 2].vers;
- *   ptr = foo->vers[x].ptr;
- *   foo->get_ref(ptr);
- *   atomic decrement foo->[x].readers, if now zero then
- *     membar_consumer;
- *     if (foo->vers[x].vers < foo->vers[(x + 1) % 2].vers)
- *       if (writer_waiting || atomic_read(foo->writer))
- *         acquire foo->cv_lock;
- *         cond_signal(foo->cv);
- *         drop foo->cv_lock;
- *   return ptr;
  */
 
 #include "thread_safe_global.h"
@@ -85,11 +49,12 @@ void pthread_cfvar_release_np(pthread_cfvar_np_t *cfvar, void *cfdata);
  * Set new data on a configuration variable
  *
  * @param [in] cfvar Pointer to configuration variable
- * @param [in] version Version number, must be 1 greater than that last obtained with get function
+ * @param [in] version Version number, must be 0 or current version + 1
  * @param [in] cfdata Pointer to configuration data
+ * @param [out] new_version New version number
  *
  * @return 0 on success, EEXIST if there's a conflict, or a system error such as ENOMEM.
  */
 int pthread_cfvar_set_np(pthread_cfvar_np_t *cfvar, uint64_t version,
-			 void *cfdata);
+			 void *cfdata, uint64_t *new_version);
 

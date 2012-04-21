@@ -32,37 +32,6 @@
  *
  * See Doxygen comments below for API details.
  *
- * typedef struct pthread_cfvar_np pthread_cfvar_np_t;
- * void pthread_cfvar_init_np(pthread_cfvar_np_t *cfvar,
- *                            void (*get_ref)(void *), # ref count increment
- *                            void (*put_ref)(void *), # ref count decrement
- *                            void *cfdata             # global variable
- *                            );
- * void *pthread_cfvar_get_np(pthread_cfvar_np_t *cfvar, uint64_t *version);
- * void *pthread_cfvar_release_np(pthread_cfvar_np_t *cfvar, void *cfdata);
- * int pthread_cfvar_set_np(pthread_cfvar_np_t *cfvar, uint64_t *version,
- *                          void *cfdata);
- *
- * "cf" here means "configuration", since the purpose of this API is to
- * get the most current configuration for an application or library.
- *
- * A cfvar holds configuration data.  A cfdata is a pointer to data of
- * an application-specific type.
- *
- * The 'get' function is guaranteed not to contend for any resources.
- * A single get call may block, but only as it races with a 'set' call.
- *
- * The 'set' call is guaranteed to be serialized relative to other 'set'
- * calls.
- *
- * Callers of the 'set' function should first 'get' the current
- * configuration data to get the current version, then increment the
- * version, then call the 'set' function.  The version number may wrap
- * (not likely though, being 64-bit...), but will never be output as
- * anything larger than UINT64_MAX - 2, nor as zero, except when no
- * configuration has been set, in which case the version will be
- * reported as zero.
- *
  * There is no guarantee that by the time the 'set' function returns all
  * other threads are using the new configuration data.  The caller may
  * arrange to obtain such guarantees by acquiring a mutex before calling
@@ -183,7 +152,7 @@ void pthread_cfvar_destroy_np(pthread_cfvar_np_t *cfvar);
 void *pthread_cfvar_get_np(pthread_cfvar_np_t *cfvar, uint64_t *version);
 
 /**
- * Release configuration data (like setting NULL as the new value)
+ * Release configuration data, setting NULL as the new value
  *
  * @param cfvar Pointer to configuration variable
  * @param cfdata Pointer to configuration data
@@ -194,11 +163,12 @@ void pthread_cfvar_release_np(pthread_cfvar_np_t *cfvar, void *cfdata);
  * Set new data on a configuration variable
  *
  * @param [in] cfvar Pointer to configuration variable
- * @param [in] version Version number, must be 1 greater than that last obtained with get function
+ * @param [in] version Version number, must be either 0 or current version + 1
  * @param [in] cfdata Pointer to configuration data
+ * @param [out] new_version New version
  *
  * @return 0 on success, EEXIST if there's a conflict, or a system error such as ENOMEM.
  */
 int pthread_cfvar_set_np(pthread_cfvar_np_t *cfvar, uint64_t version,
-			 void *cfdata);
+			 void *cfdata, uint64_t *new_version);
 
