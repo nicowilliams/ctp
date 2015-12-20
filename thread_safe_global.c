@@ -8,7 +8,7 @@
  *  - writers are serialized
  *  - readers are fast, rarely doing blocking operations, and when they
  *    do, not blocking on contended resources
- *  - readers do not starve writers
+ *  - readers do not starve writers; writers do not block readers
  *
  * There are several atomic compositions needed to make this work.
  *
@@ -24,10 +24,10 @@
  * starve writers.  But since the only thing readers here do with a
  * would-be read-write lock held is grab a reference to a "current"
  * value, this construction can be faster than read-write locks without
- * writer starvation: readers *never* block on contended resources.  We
- * achieve this by having two value slots: one for the current value,
- * and one for the previous/next value.  Readers can always lock-less-ly
- * find one of the two values.
+ * writer starvation: readers (almost) *never* block on contended
+ * resources.  We achieve this by having two value slots: one for the
+ * current value, and one for the previous/next value.  Readers can
+ * always lock-less-ly find one of the two values.
  *
  * Whereas in the case of a read-write lock without writer starvation,
  * readers arriving after a writer must get held up for the writer who,
@@ -46,9 +46,10 @@
  *            visibility rules (see above).
  *
  *            We could probably make this code more efficient using
- *            explicit membars, on some CPUs anyways.  But this should
- *            already be quite a lot faster for readers than using
- *            read-write locks.
+ *            explicit acquire/release membars, on some CPUs anyways.
+ *            But this should already be quite a lot faster for readers
+ *            than using read-write locks, and a much more convenient
+ *            and natural API to boot.
  */
 
 /*
@@ -56,6 +57,8 @@
  *
  *  - Add a getter that gets the value saved in a thread-local, rather
  *    than a fresh value.  Or make this an argument to the get function.
+ *
+ *  - Use a single global thread-specific key, not a per-variable one.
  */
 
 #include <assert.h>
@@ -63,16 +66,9 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "thread_safe_global.h"
-
-#ifndef HAVE_ATOMICS
-extern uint32_t atomic_inc_32_nv(volatile uint32_t *);
-extern uint64_t atomic_inc_64_nv(volatile uint64_t *);
-extern uint32_t atomic_dec_32_nv(volatile uint32_t *);
-extern void *atomic_cas_ptr(volatile void *, void *, void *);
-extern uint64_t atomic_cas_64(volatile uint64_t *, uint64_t, uint64_t);
-#endif
-
+#include "atomics.h"
 
 static void
 wrapper_free(struct cfwrapper *wrapper)
@@ -80,7 +76,7 @@ wrapper_free(struct cfwrapper *wrapper)
     if (wrapper == NULL || atomic_dec_32_nv(&wrapper->nref) != 0)
         return;
     if (wrapper->dtor != NULL)
-        wrapper->dtor(wrapper);
+        wrapper->dtor(wrapper->ptr);
     wrapper->wrapper_dtor(wrapper);
 }
 
@@ -118,8 +114,11 @@ pthread_cfvar_init_np(pthread_cfvar_np_t *cfv,
      * at thread-exit time, if the thread does not explicitly drop the
      * reference before then.
      *
-     * There's no pthread_key_destroy(), so we leak these.  We could
-     * have a single global thread key pointing to an array of keys.
+     * There's no pthread_key_destroy(), so we leak these.  We ought to
+     * have a single global thread key whose values point to a
+     * counted-length array of keys, with a global counter that we
+     * snapshot here and use as an index into that array (and which is
+     * realloc()'ed as needed).
      */
     if ((err = pthread_key_create(&cfv->tkey, cfvar_dtor_wrapper)) != 0) {
         memset(cfv, 0, sizeof(*cfv));
@@ -190,8 +189,20 @@ pthread_cfvar_destroy_np(pthread_cfvar_np_t *cfvar)
     pthread_cond_destroy(&cfvar->cv);
     pthread_mutex_destroy(&cfvar->cv_lock);
     pthread_mutex_destroy(&cfvar->write_lock);
-    /* CFs will be released by the thread-specifics' destructors */
-    /* We leak cfvar->tkey!  See note in initiator above. */
+    /* Though we still need to release them here, with no locks held */
+#if 0
+    /* XXX But this results in a double-free */
+    wrapper_free(cfvar->vars[0].wrapped);
+    wrapper_free(cfvar->vars[1].wrapped);
+    cfvar->vars[0].wrapped = NULL;
+    cfvar->vars[1].wrapped = NULL;
+#endif
+    memset(cfvar, 0, sizeof(*cfvar));
+    cfvar->vars[0].other = NULL;
+    cfvar->vars[1].other = NULL;
+    cfvar->dtor = NULL;
+    /* Remaining references will be released by the thread-specifics' destructors */
+    /* XXX We leak cfvar->tkey!  See note in initiator above. */
 }
 
 /**
@@ -217,6 +228,7 @@ pthread_cfvar_get_np(pthread_cfvar_np_t *cfv, void **res, uint64_t *version)
 
     if (version == NULL)
         version = &vers;
+    *version = 0;
 
     *res = NULL;
 
@@ -224,105 +236,119 @@ pthread_cfvar_get_np(pthread_cfvar_np_t *cfv, void **res, uint64_t *version)
     *version = atomic_cas_64(&cfv->version, 0, 0); /* racy; see below */
     if (*version == 0) {
         /* Not set yet */
+        assert(*version == 0 || *res != NULL);
         return 0;
     }
+
     v = &cfv->vars[(*version + 1) & 0x1];
 
     /*
-     * We picked a slot, but we could just have lost against a writer.
+     * We picked a slot, but we could just have lost against one or more
+     * writers.
      *
-     * We increment nreaders for that slot to keep out subsequent
-     * writers: we can lose this race at most once per turn.
+     * We increment nreaders for the slot we picked to keep out
+     * subsequent writers; we can then lose one more race at most.
      *
      * But we still need to learn whether we lost the race.
      */
     (void) atomic_inc_32_nv(&v->nreaders);
-    for (i = 2; i > 0; i--) {
-        if (v->wrapped == NULL) {
-            /* Whoa, nothing there; shouldn't happen */
 
-            (void) atomic_dec_32_nv(&v->nreaders);
-            return 0;
-        }
-
-        /* See if we won any race */
-        if (atomic_cas_64(&cfv->version, 0, 0) == *version) {
-            /*
-             * We won, or didn't race at all.  We can now safely
-             * increment nref for the wrapped value in the current slot.
-             *
-             * The key here is that we updated nreaders for one slot,
-             * which might not keep the one writer we might have been
-             * racing with from making the then current slot the now
-             * previous slot, but because writers are serialized it will
-             * keep the next writer from touching the slot we thought
-             * was the current slot.  Thus here we either have the
-             * current slot or the previous slot, and either way it's OK
-             * for us to grab a reference to the wrapped value in the
-             * slot we took.
-             */
-            nref = atomic_inc_32_nv(&v->wrapped->nref);
-            assert(nref > 1);
-            *version = v->wrapped->version;
-            *res = v->wrapped->ptr;
-
-            (void) atomic_dec_32_nv(&v->nreaders);
-            pthread_cfvar_release_np(cfv);
-            return pthread_setspecific(cfv->tkey, v->wrapped);
-        }
-
+    /* See if we won any race */
+    if (atomic_cas_64(&cfv->version, 0, 0) == *version) {
         /*
-         * We lost the race with at most one writer for that slot.  So
-         * we now have a hold of a slot that isn't the current slot and
-         * we might be racing with a second writer who will release the
-         * value in the slot we do have a reference to.  If we tried to
-         * incref this slot's value now, that would be a disaster.
+         * We won, or didn't race at all.  We can now safely
+         * increment nref for the wrapped value in the current slot.
          *
-         * Instead we increment the reader count on the other slot, but
-         * we do it *before* decrementing the reader count on this one.
-         * This should guarantee that we find the other one present by
-         * keeping subsequent writers (subsequent to the second writer
-         * we might be racing with) out of both slots for the time
-         * between the update of one slot's nreaders and the other's.
-         *
-         * We have to repeat the race loss detection for the second
-         * slot, thus this is a loop.  But we need only do this at most
-         * once.
+         * The key here is that we updated nreaders for one slot,
+         * which might not keep the one writer we might have been
+         * racing with from making the then current slot the now
+         * previous slot, but because writers are serialized it will
+         * keep the next writer from touching the slot we thought
+         * was the current slot.  Thus here we either have the
+         * current slot or the previous slot, and either way it's OK
+         * for us to grab a reference to the wrapped value in the
+         * slot we took.
          */
-        atomic_inc_32_nv(&v->other->nreaders);
-        vers2 = atomic_cas_64(&cfv->version, 0, 0);
-        assert(vers2 == ++(*version));
-        *version = vers2;
-        if (atomic_dec_32_nv(&v->nreaders) == 0) {
-            /*
-             * As the last reader of this v we have to signal the
-             * writer that may be waiting for us to stop reading.
-             *
-             * Errors here could be ignored, but leaving a writer stuck
-             * is worth indicating.
-             */
-            if ((err = pthread_mutex_lock(&cfv->cv_lock)) != 0) {
-                atomic_dec_32_nv(&v->other->nreaders);
-                return err;
-            }
-            if ((err = pthread_cond_broadcast(&cfv->cv)) != 0) {
-                atomic_dec_32_nv(&v->other->nreaders);
-                (void) pthread_mutex_unlock(&cfv->cv_lock);
-                return err;
-            }
-            if ((err = pthread_mutex_unlock(&cfv->cv_lock)) != 1) {
-                atomic_dec_32_nv(&v->other->nreaders);
-                return err;
-            }
-        }
-        v = v->other;
-        assert(v == &cfv->vars[(*version + 1) & 0x1]);
+        goto got_current_slot;
     }
 
-    /* We shouldn't get here */
-    assert(cfv->version == (uint64_t)-1);
+    /*
+     * We lost the race with at most one writer for that slot.  So
+     * we now have a hold of a slot, and we don't know whether it's the
+     * current slot or not, plus we might still be racing with a second
+     * writer who might release the value in the slot we do have a
+     * reference to.  If we tried to incref this slot's value now, that
+     * would be a disaster.
+     *
+     * Instead we increment the reader count on the other slot, but
+     * we do it *before* decrementing the reader count on this one.
+     * This should guarantee that we find the other one present by
+     * keeping subsequent writers (subsequent to the second writer
+     * we might be racing with) out of both slots for the time
+     * between the update of one slot's nreaders and the other's.
+     *
+     * We have to repeat the race loss detection for the second slot.
+     * We need only do this at most once.
+     */
+    atomic_inc_32_nv(&v->other->nreaders);
+
+    /*
+     * Once we've incremented both slots' nreaders, we can assume that
+     * the var's version is stable.
+     */
+    vers2 = atomic_cas_64(&cfv->version, 0, 0);
+    assert(vers2 > *version);
+    *version = vers2;
+
+    /* Now we re-select that which must be the current slot */
+    v = &cfv->vars[(*version + 1) & 0x1];
+    assert(v == &cfv->vars[(*version + 1) & 0x1]);
+
+    /* We hold two slots, release the not-current slot */
+    if (atomic_dec_32_nv(&v->other->nreaders) == 0) {
+        /*
+         * As the last reader of a previous slot we have to signal the
+         * writer that may be waiting for us to stop reading.
+         *
+         * Errors here could be ignored, but leaving a writer stuck is
+         * worth indicating.  We could use a better error code if this
+         * should ever happen, though, of course, it shouldn't.
+         */
+        if ((err = pthread_mutex_lock(&cfv->cv_lock)) != 0) {
+            atomic_dec_32_nv(&v->nreaders);
+            return err;
+        }
+        if ((err = pthread_cond_signal(&cfv->cv)) != 0) {
+            atomic_dec_32_nv(&v->nreaders);
+            (void) pthread_mutex_unlock(&cfv->cv_lock);
+            return err;
+        }
+        if ((err = pthread_mutex_unlock(&cfv->cv_lock)) != 0) {
+            atomic_dec_32_nv(&v->nreaders);
+            return err;
+        }
+    }
+
+got_current_slot:
+    if (v->wrapped == NULL) {
+        /* Whoa, nothing there; shouldn't happen; assert? */
+        assert(*version == 0);
+        (void) atomic_dec_32_nv(&v->nreaders);
+        assert(*version == 0 || *res != NULL);
+        return 0;
+    }
+
+    assert(v->wrapped != NULL && v->wrapped->ptr != NULL);
+    nref = atomic_inc_32_nv(&v->wrapped->nref);
+    assert(nref > 1);
+    *version = v->wrapped->version;
+    *res = v->wrapped->ptr;
+    assert(*res != NULL);
+
     (void) atomic_dec_32_nv(&v->nreaders);
-    return EAGAIN;
+    pthread_cfvar_release_np(cfv);
+    assert(*version == 0 || *res != NULL);
+    return pthread_setspecific(cfv->tkey, v->wrapped);
 }
 
 /**
@@ -345,13 +371,11 @@ pthread_cfvar_wait_np(pthread_cfvar_np_t *cfv)
            junk == NULL) {
         if ((err = pthread_cond_wait(&cfv->waiter_cv,
                                      &cfv->waiter_lock)) != 0) {
-            (void) atomic_dec_32_nv(&cfv->waiters);
             (void) pthread_mutex_unlock(&cfv->waiter_lock);
             return err;
         }
     }
 
-    (void) atomic_dec_32_nv(&cfv->waiters);
     (void) pthread_cond_signal(&cfv->waiter_cv); /* no thundering herd */
     if ((err = pthread_mutex_unlock(&cfv->waiter_lock)) != 0)
         return err;
@@ -371,9 +395,9 @@ pthread_cfvar_release_np(pthread_cfvar_np_t *cfv)
 
     if (wrapper == NULL)
         return;
-    if (pthread_setspecific(cfv->tkey, NULL) != 0 &&
-        pthread_getspecific(cfv->tkey) == wrapper)
-        return;
+    if (pthread_setspecific(cfv->tkey, NULL) != 0)
+        abort();
+    assert(pthread_getspecific(cfv->tkey) == NULL);
     wrapper_free(wrapper);
 }
 
@@ -395,6 +419,9 @@ pthread_cfvar_set_np(pthread_cfvar_np_t *cfv, void *cfdata,
     struct cfvar *v;
     struct cfwrapper *old_wrapper = NULL;
     struct cfwrapper *wrapper;
+    struct cfwrapper *tmp;
+
+    assert(cfdata != NULL);
 
     *new_version = 0;
 
@@ -416,24 +443,36 @@ pthread_cfvar_set_np(pthread_cfvar_np_t *cfv, void *cfdata,
         return err;
     }
 
-    *new_version = wrapper->version = (atomic_cas_64(&cfv->version, 0, 0) + 1);
+    /* cfv->version is stable because we hold the write_lock */
+    *new_version = wrapper->version = atomic_cas_64(&cfv->version, 0, 0);
 
-    /* Grab the next slot (the previous one to the current one) */
-    v = &cfv->vars[(*new_version + 1) & 0x1];
-    old_wrapper = atomic_cas_ptr(&v->wrapped, NULL, NULL);
+    /* Grab the next slot: the previous one to the current one */
+    v = cfv->vars[(*new_version + 1) & 0x1].other;
+    old_wrapper = atomic_cas_ptr((volatile void **)&v->wrapped, NULL, NULL);
 
-    if (*new_version == 1) {
+    if (*new_version == 0) {
         /* This is the first cf being written; easy */
         v = &cfv->vars[0];
 
         /* These writes can become visible out of order */
-        (void) atomic_cas_ptr(&v->wrapped, old_wrapper, wrapper);
+        tmp = atomic_cas_ptr((volatile void **)&v->wrapped, old_wrapper, wrapper);
+        assert(tmp == old_wrapper && tmp == NULL);
         (void) atomic_inc_64_nv(&cfv->version);
+
+        /* Also set this wrapped value on the other slot, why not */
+        (void) atomic_inc_32_nv(&wrapper->nref);
+        v = &cfv->vars[1];
+        tmp = atomic_cas_ptr((volatile void **)&v->wrapped, old_wrapper, wrapper);
+        assert(tmp == old_wrapper && tmp == NULL);
+
+        /* Signal waiters */
         (void) pthread_mutex_lock(&cfv->waiter_lock);
         (void) pthread_cond_signal(&cfv->waiter_cv); /* no thundering herd */
         (void) pthread_mutex_unlock(&cfv->waiter_lock);
         return pthread_mutex_unlock(&cfv->write_lock);
     }
+
+    assert(old_wrapper != NULL && old_wrapper->nref > 0); /* XXX Tripped once, but fixed bugs since; maybe this is gone now */
 
     /* Wait until that slot is quiescent before mutating it */
     if ((err = pthread_mutex_lock(&cfv->cv_lock)) != 0) {
@@ -448,7 +487,29 @@ pthread_cfvar_set_np(pthread_cfvar_np_t *cfv, void *cfdata,
          * race for the writer lock, so we'll hold onto it, and thus
          * avoid having to restart here.
          */
-        if ((err = pthread_cond_wait(&cfv->cv, &cfv->cv_lock)) != 0) {
+        /*
+         * XXX We can get in a situation where we can block here and no
+         * reader will signal us.  But that makes no sense.  If we got
+         * here then there was a reader on the prev/next slot, and that
+         * reader does drop that nreaders and when one such reader makes
+         * nreaders zero, it will need to grab cv_lock to signal us, and
+         * since we're here we're either holding cv_lock or waiting on
+         * cv, so this can't happen.  What happened to get us stuck
+         * here??  Say we get the signal... but then we're holding
+         * cv_lock and any other readers who might have incremented then
+         * decremented this slot's nreaders will also have to signal us
+         * and we can't miss it.
+         *
+         * We work around this with a timedwait.  Lame, yes.
+         */
+        struct timespec tmout;
+        (void) clock_gettime(CLOCK_REALTIME, &tmout);
+        tmout.tv_nsec += 5000000; /* 5ms */
+        if (tmout.tv_nsec > 1000000000) {
+            tmout.tv_sec++;
+            tmout.tv_nsec %= 1000000000;
+        }
+        if ((err = pthread_cond_timedwait(&cfv->cv, &cfv->cv_lock, &tmout)) != 0 && err != ETIMEDOUT) {
             (void) pthread_mutex_unlock(&cfv->cv_lock);
             (void) pthread_mutex_unlock(&cfv->write_lock);
             free(wrapper);
@@ -462,16 +523,15 @@ pthread_cfvar_set_np(pthread_cfvar_np_t *cfv, void *cfdata,
     }
 
     /* Update that now quiescent slot */
-    (void) atomic_cas_ptr(&v->wrapped, old_wrapper, wrapper);
+    tmp = atomic_cas_ptr((volatile void **)&v->wrapped, old_wrapper, wrapper);
+    assert(tmp == old_wrapper);
 
-    /* Update current slot pointer */
     (void) atomic_inc_64_nv(&cfv->version);
 
-    /* Done */
-    err = pthread_mutex_unlock(&cfv->write_lock);
-
     /* Release the old cf */
+    assert(old_wrapper != NULL && old_wrapper->nref > 0);
     wrapper_free(old_wrapper);
-    return err;
-}
 
+    /* Done */
+    return pthread_mutex_unlock(&cfv->write_lock);
+}

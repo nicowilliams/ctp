@@ -41,7 +41,6 @@ typedef struct pthread_cfvar_np {
     struct cfvar                    vars[2];    /* writer only */
     pthread_cfvar_destructor_np_t   dtor;       /* both read this */
     uint64_t                        version;    /* both read; writer writes */
-    uint32_t                        waiters;    /* unused */
 } pthread_cfvar_np_t;
 
 /**
