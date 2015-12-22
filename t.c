@@ -40,8 +40,12 @@ main(int argc, char **argv)
 {
     size_t i, k;
     int urandom_fd;
-    uint64_t magic_exit = MAGIC_EXIT;
+    uint64_t *magic_exit;
     uint64_t version;
+
+    if ((magic_exit = malloc(sizeof(*magic_exit))) == NULL)
+        err(1, "malloc failed");
+    *magic_exit = MAGIC_EXIT;
     
     for (i = 0; i < MY_NTHREADS; i++)
         runs[i] = 0;
@@ -75,7 +79,7 @@ main(int argc, char **argv)
         if ((errno = pthread_cond_wait(&exit_cv, &exit_cv_lock)) != 0)
             err(1, "pthread_cond_wait(&exit_cv, &exit_cv_lock) failed");
         if (nthreads == NREADERS) {
-            if ((errno = pthread_cfvar_set_np(&var, &magic_exit, &version)) != 0)
+            if ((errno = pthread_cfvar_set_np(&var, magic_exit, &version)) != 0)
                 err(1, "pthread_cfvar_set_np failed");
             printf("\nTold readers to exit.\n");
         }
@@ -129,6 +133,8 @@ reader(void *data)
                 err(1, "Failed to release exit lock");
             return NULL;
         }
+        assert(*(uint64_t *)p != MAGIC_FREED);
+        assert(*(uint64_t *)p == MAGIC_INITED);
         if (*(uint64_t *)p == MAGIC_FREED)
             err(1, "data is no longer live here!");
         if (*(uint64_t *)p != MAGIC_INITED)
@@ -163,7 +169,7 @@ writer(void *data)
         i = 4999;
 
     if (thread_num == NREADERS + 3) {
-        us = 500;
+        us %= 500;
         i *=10;
     }
 
@@ -177,7 +183,7 @@ writer(void *data)
         if ((errno = pthread_cfvar_set_np(&var, p, &version)) != 0)
             err(1, "pthread_cfvar_set_np(&var) failed");
         if (version < last_version)
-            err(1, "version went backwards for this reader!");
+            err(1, "version went backwards for this writer!");
         last_version = version;
         (*(runs[thread_num]))++;
         wruns++;

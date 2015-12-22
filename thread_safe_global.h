@@ -12,19 +12,20 @@ extern "C" {
 /* _np == non-portable, really, non-standard extension */
 typedef void (*pthread_cfvar_destructor_np_t)(void *);
 
-/* XXX Make private? */
+/* XXX Make private */
 struct cfwrapper {
     pthread_cfvar_destructor_np_t   dtor;
-    void                            (*wrapper_dtor)(void *);
     void                            *ptr;       /* the actual value */
     uint32_t                        nref;       /* release when drops to 0 */
     uint64_t                        version;
 };
 
+/* Can't make private without making pthread_cfvar_np below private too */
 struct cfvar {
-    uint32_t            nreaders;   /* no. of active readers */
-    struct cfwrapper    *wrapped;   /* has nref, wraps real ptr */
-    struct cfvar        *other;     /* points to the other slot */
+    uint32_t            nreaders;   /* no. of readers active in this slot */
+    struct cfwrapper    *wrapper;   /* wraps real ptr, has nref */
+    struct cfvar        *other;     /* always points to the other slot */
+    uint64_t            version;
 };
 
 /*
@@ -32,7 +33,7 @@ struct cfvar {
  * exposed in the ABI.  Maybe we shouldn't do that.
  */
 typedef struct pthread_cfvar_np {
-    pthread_key_t                   tkey;
+    pthread_key_t                   tkey;       /* to detect thread exits */
     pthread_mutex_t                 write_lock; /* one writer at a time */
     pthread_mutex_t                 cv_lock;    /* to signal waiting writer */
     pthread_mutex_t                 waiter_lock;/* to signal waiters */
