@@ -186,12 +186,12 @@ pthread_cfvar_init_np(pthread_cfvar_np_t *cfv,
     }
 
     /*
-     * cfv->version is a 64-bit unsigned int.  If ever we can't get
+     * cfv->nxt_version is a 64-bit unsigned int.  If ever we can't get
      * atomics to deal with it on 32-bit platforms we could have a
      * pointer to one of two version numbers which are not atomically
      * updated, and instead atomically update the pointer.
      */
-    cfv->version = 0;
+    cfv->nxt_version = 0;
     cfv->vars[0].nreaders = 0;
     cfv->vars[0].wrapper = NULL;
     cfv->vars[0].other = &cfv->vars[1]; /* other pointer never changes */
@@ -230,7 +230,7 @@ pthread_cfvar_destroy_np(pthread_cfvar_np_t *cfv)
     cfv->dtor = NULL;
     pthread_mutex_unlock(&cfv->write_lock);
     pthread_mutex_destroy(&cfv->write_lock);
-    /* Remaining references will be released by the thread-specifics' destructors */
+    /* Remaining references will be released by the thread key destructor */
     /* XXX We leak cfvar->tkey!  See note in initiator above. */
 }
 
@@ -285,12 +285,13 @@ pthread_cfvar_get_np(pthread_cfvar_np_t *cfv, void **res, uint64_t *version)
      */
 
     /* Get the current slot */
-    *version = atomic_cas_64(&cfv->version, 0, 0); /* racy; see below */
+    *version = atomic_cas_64(&cfv->nxt_version, 0, 0); /* racy; see below */
     if (*version == 0) {
         /* Not set yet */
         assert(*version == 0 || *res != NULL);
         return 0;
     }
+    (*version)--;
 
     v = &cfv->vars[(*version + 1) & 0x1];
 
@@ -307,7 +308,7 @@ pthread_cfvar_get_np(pthread_cfvar_np_t *cfv, void **res, uint64_t *version)
     (void) atomic_inc_32_nv(&v->nreaders);
 
     /* See if we won any race */
-    if ((vers2 = atomic_cas_64(&cfv->version, 0, 0)) == *version) {
+    if ((vers2 = atomic_cas_64(&cfv->nxt_version, 0, 0)) == *version) {
         /*
          * We won, or didn't race at all.  We can now safely
          * increment nref for the wrapped value in the current slot.
@@ -327,7 +328,8 @@ pthread_cfvar_get_np(pthread_cfvar_np_t *cfv, void **res, uint64_t *version)
 
     /*
      * We may have incremented nreaders for the wrong slot.  Any number
-     * of writers could have written between our getting cfv->version
+     * of writers could have written between our getting
+     * cfv->nxt_version
      * the first time, and our incrementing nreaders for the
      * corresponding slot.  We can't incref the nref of the value
      * wrapper found at the slot we picked.  We first have to find the
@@ -350,11 +352,11 @@ pthread_cfvar_get_np(pthread_cfvar_np_t *cfv, void **res, uint64_t *version)
     got_both_slots = 1;
 
     /*
-     * cfv->version can now increment by at most one, and we're
+     * cfv->nxt_version can now increment by at most one, and we're
      * guaranteed to have one usable slot (whichever one we _now_ see as
      * the current slot).
      */
-    vers2 = atomic_cas_64(&cfv->version, 0, 0);
+    vers2 = atomic_cas_64(&cfv->nxt_version, 0, 0);
     assert(vers2 > *version);
     *version = vers2;
 
@@ -375,7 +377,8 @@ got_a_slot:
         return (err2 == 0) ? err : err2;
     }
 
-    assert(vers2 == atomic_cas_64(&cfv->version, 0, 0) || (vers2 + 1) == atomic_cas_64(&cfv->version, 0, 0));
+    assert(vers2 == atomic_cas_64(&cfv->nxt_version, 0, 0) ||
+           (vers2 + 1) == atomic_cas_64(&cfv->nxt_version, 0, 0));
     nref = atomic_inc_32_nv(&v->wrapper->nref);
     assert(nref > 1);
     *version = v->wrapper->version;
@@ -509,8 +512,8 @@ pthread_cfvar_set_np(pthread_cfvar_np_t *cfv, void *cfdata,
         return err;
     }
 
-    /* cfv->version is stable because we hold the write_lock */
-    *new_version = wrapper->version = atomic_cas_64(&cfv->version, 0, 0);
+    /* cfv->nxt_version is stable because we hold the write_lock */
+    *new_version = wrapper->version = atomic_cas_64(&cfv->nxt_version, 0, 0);
 
     /* Grab the next slot: the previous one to the current one */
     v = cfv->vars[(*new_version + 1) & 0x1].other;
@@ -523,13 +526,14 @@ pthread_cfvar_set_np(pthread_cfvar_np_t *cfv, void *cfdata,
             v = &cfv->vars[i];
             nref = atomic_inc_32_nv(&wrapper->nref);
             v->version = 0;
-            tmp = atomic_cas_ptr((volatile void **)&v->wrapper, old_wrapper, wrapper);
+            tmp = atomic_cas_ptr((volatile void **)&v->wrapper,
+                                 old_wrapper, wrapper);
             assert(tmp == old_wrapper && tmp == NULL);
         }
 
         assert(nref > 1);
 
-        tmp_version = atomic_inc_64_nv(&cfv->version);
+        tmp_version = atomic_inc_64_nv(&cfv->nxt_version);
         assert(tmp_version == 1);
 
         /* Signal waiters */
@@ -558,6 +562,10 @@ pthread_cfvar_set_np(pthread_cfvar_np_t *cfv, void *cfdata,
          * avoid having to restart here.
          */
 #if 0
+        /*
+         * XXX For a while the reader logic for when to signal writers
+         * was busted and we needed a timedwait in the writer.
+         */
         struct timespec tmout;
         (void) clock_gettime(CLOCK_REALTIME, &tmout);
         tmout.tv_nsec += 5000000; /* 5ms */
@@ -565,13 +573,21 @@ pthread_cfvar_set_np(pthread_cfvar_np_t *cfv, void *cfdata,
             tmout.tv_sec++;
             tmout.tv_nsec %= 1000000000;
         }
-#endif
-        if ((err = pthread_cond_wait(&cfv->cv, &cfv->cv_lock)) != 0 && err != ETIMEDOUT) {
+        if ((err = pthread_cond_timedwait(&cfv->cv, &cfv->cv_lock)) != 0 &&
+            err != ETIMEDOUT) {
             (void) pthread_mutex_unlock(&cfv->cv_lock);
             (void) pthread_mutex_unlock(&cfv->write_lock);
             free(wrapper);
             return err;
         }
+#else
+        if ((err = pthread_cond_wait(&cfv->cv, &cfv->cv_lock)) != 0) {
+            (void) pthread_mutex_unlock(&cfv->cv_lock);
+            (void) pthread_mutex_unlock(&cfv->write_lock);
+            free(wrapper);
+            return err;
+        }
+#endif
     }
     if ((err = pthread_mutex_unlock(&cfv->cv_lock)) != 0) {
         (void) pthread_mutex_unlock(&cfv->write_lock);
@@ -584,7 +600,7 @@ pthread_cfvar_set_np(pthread_cfvar_np_t *cfv, void *cfdata,
     assert(tmp == old_wrapper);
 
     v->version = *new_version;
-    tmp_version = atomic_inc_64_nv(&cfv->version);
+    tmp_version = atomic_inc_64_nv(&cfv->nxt_version);
     assert(tmp_version == *new_version + 1);
     assert(v->version > v->other->version || v->version == 0);
     assert(v->version > v->other->version || v->other->version == 0);

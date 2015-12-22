@@ -41,7 +41,7 @@ typedef struct pthread_cfvar_np {
     pthread_cond_t                  waiter_cv;  /* to signal waiters */
     struct cfvar                    vars[2];    /* writer only */
     pthread_cfvar_destructor_np_t   dtor;       /* both read this */
-    uint64_t                        version;    /* both read; writer writes */
+    uint64_t                        nxt_version;/* both read; writer writes */
 } pthread_cfvar_np_t;
 
 /**
