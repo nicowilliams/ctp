@@ -278,11 +278,17 @@ pthread_cfvar_get_np(pthread_cfvar_np_t *cfv, void **res, uint64_t *version)
 
     *res = NULL;
 
-    /*
-     * XXX Add a fast path.  Check that the wrapper saved in the
-     * thread-specific has the same as the current version, and if so
-     * output that value now.
-     */
+#ifndef NO_FAST_PATH
+    {
+        wrapper = pthread_getspecific(cfv->tkey);
+        if (wrapper != NULL &&
+            wrapper->version == 1 + atomic_cas_64(&cfv->nxt_version, 0, 0)) {
+            *version = 1 + wrapper->version;
+            *res = wrapper->ptr;
+            return 0;
+        }
+    }
+#endif
 
     /* Get the current slot */
     *version = atomic_cas_64(&cfv->nxt_version, 0, 0); /* racy; see below */
