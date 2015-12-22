@@ -86,6 +86,9 @@
  *
  *  - Add a getter that gets the value saved in a thread-local, rather
  *    than a fresh value.  Or make this an argument to the get function.
+ *
+ *  - Rename / add option to rename all the symbols to avoid using the
+ *    pthread namespace.
  */
 
 #include <assert.h>
