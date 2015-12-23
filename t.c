@@ -33,7 +33,7 @@ enum magic {
     MAGIC_EXIT = 0xAABBCCDDFFEEDDCCUL,
 };
 
-pthread_cfvar_np_t var;
+pthread_var_np_t var;
 
 int
 main(int argc, char **argv)
@@ -50,8 +50,8 @@ main(int argc, char **argv)
     for (i = 0; i < MY_NTHREADS; i++)
         runs[i] = 0;
 
-    if ((errno = pthread_cfvar_init_np(&var, dtor)) != 0)
-        err(1, "pthread_cfvar_init_np() failed");
+    if ((errno = pthread_var_init_np(&var, dtor)) != 0)
+        err(1, "pthread_var_init_np() failed");
 
     if ((urandom_fd = open("/dev/urandom", O_RDONLY)) == -1)
         err(1, "Failed to open(\"/dev/urandom\", O_RDONLY)");
@@ -79,13 +79,13 @@ main(int argc, char **argv)
         if ((errno = pthread_cond_wait(&exit_cv, &exit_cv_lock)) != 0)
             err(1, "pthread_cond_wait(&exit_cv, &exit_cv_lock) failed");
         if (nthreads == NREADERS) {
-            if ((errno = pthread_cfvar_set_np(&var, magic_exit, &version)) != 0)
-                err(1, "pthread_cfvar_set_np failed");
+            if ((errno = pthread_var_set_np(&var, magic_exit, &version)) != 0)
+                err(1, "pthread_var_set_np failed");
             printf("\nTold readers to exit.\n");
         }
     }
     (void) pthread_mutex_unlock(&exit_cv_lock);
-    pthread_cfvar_destroy_np(&var);
+    pthread_var_destroy_np(&var);
     return 0;
 }
 
@@ -111,13 +111,13 @@ reader(void *data)
 
     printf("Reader (%jd) will sleep %uus between runs\n", (intmax_t)thread_num, us);
 
-    if ((errno = pthread_cfvar_wait_np(&var)) != 0)
-        err(1, "pthread_cfvar_wait_np(&var) failed");
+    if ((errno = pthread_var_wait_np(&var)) != 0)
+        err(1, "pthread_var_wait_np(&var) failed");
 
     for (;;) {
         assert(rruns == (*(runs[thread_num])));
-        if ((errno = pthread_cfvar_get_np(&var, &p, &version)) != 0)
-            err(1, "pthread_cfvar_get_np(&var) failed");
+        if ((errno = pthread_var_get_np(&var, &p, &version)) != 0)
+            err(1, "pthread_var_get_np(&var) failed");
 
         if (version < last_version)
             err(1, "version went backwards for this reader!");
@@ -180,8 +180,8 @@ writer(void *data)
         if ((p = malloc(sizeof(*p))) == NULL)
             err(1, "malloc() failed");
         *p = MAGIC_INITED;
-        if ((errno = pthread_cfvar_set_np(&var, p, &version)) != 0)
-            err(1, "pthread_cfvar_set_np(&var) failed");
+        if ((errno = pthread_var_set_np(&var, p, &version)) != 0)
+            err(1, "pthread_var_set_np(&var) failed");
         if (version < last_version)
             err(1, "version went backwards for this writer!");
         last_version = version;
