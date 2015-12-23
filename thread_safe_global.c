@@ -96,7 +96,6 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h> /* XXX Remove */
 #include "thread_safe_global.h"
 #include "atomics.h"
 
@@ -282,6 +281,11 @@ pthread_cfvar_get_np(pthread_cfvar_np_t *cfv, void **res, uint64_t *version)
     *res = NULL;
 
 #ifndef NO_FAST_PATH
+    /*
+     * This is #ifndef'ed to make it possible to test without the fast
+     * path: it might make it easier to trip race conditions that might
+     * not be handled below.
+     */
     {
         wrapper = pthread_getspecific(cfv->tkey);
         if (wrapper != NULL &&
@@ -293,16 +297,17 @@ pthread_cfvar_get_np(pthread_cfvar_np_t *cfv, void **res, uint64_t *version)
     }
 #endif
 
-    /* Get the current slot */
-    *version = atomic_cas_64(&cfv->nxt_version, 0, 0); /* racy; see below */
+    /* Get the current next version */
+    *version = atomic_cas_64(&cfv->nxt_version, 0, 0);
     if (*version == 0) {
         /* Not set yet */
         assert(*version == 0 || *res != NULL);
         return 0;
     }
-    (*version)--;
+    (*version)--; /* make it the current version */
 
-    v = &cfv->vars[(*version + 1) & 0x1];
+    /* Get what we hope is still the current slot */
+    v = &cfv->vars[(*version) & 0x1];
 
     /*
      * We picked a slot, but we could just have lost against one or more
@@ -322,6 +327,8 @@ pthread_cfvar_get_np(pthread_cfvar_np_t *cfv, void **res, uint64_t *version)
          * We won, or didn't race at all.  We can now safely
          * increment nref for the wrapped value in the current slot.
          *
+         * We can still have lost one race, but this slot is now ours.
+         *
          * The key here is that we updated nreaders for one slot,
          * which might not keep the one writer we might have been
          * racing with from making the then current slot the now
@@ -338,12 +345,11 @@ pthread_cfvar_get_np(pthread_cfvar_np_t *cfv, void **res, uint64_t *version)
     /*
      * We may have incremented nreaders for the wrong slot.  Any number
      * of writers could have written between our getting
-     * cfv->nxt_version
-     * the first time, and our incrementing nreaders for the
-     * corresponding slot.  We can't incref the nref of the value
-     * wrapper found at the slot we picked.  We first have to find the
-     * correct current slot, or ensure that no writer will release the
-     * other slot.
+     * cfv->nxt_version the first time, and our incrementing nreaders
+     * for the corresponding slot.  We can't incref the nref of the
+     * value wrapper found at the slot we picked.  We first have to find
+     * the correct current slot, or ensure that no writer will release
+     * the other slot.
      *
      * We increment the reader count on the other slot, but we do it
      * *before* decrementing the reader count on this one.  This should
@@ -363,14 +369,14 @@ pthread_cfvar_get_np(pthread_cfvar_np_t *cfv, void **res, uint64_t *version)
     /*
      * cfv->nxt_version can now increment by at most one, and we're
      * guaranteed to have one usable slot (whichever one we _now_ see as
-     * the current slot).
+     * the current slot, and which can still become the previous slot).
      */
     vers2 = atomic_cas_64(&cfv->nxt_version, 0, 0);
     assert(vers2 > *version);
-    *version = vers2;
+    *version = vers2 - 1;
 
     /* Select a slot that looks current in this thread */
-    v = &cfv->vars[(*version + 1) & 0x1];
+    v = &cfv->vars[(*version) & 0x1];
 
 got_a_slot:
     if (v->wrapper == NULL) {
@@ -388,6 +394,8 @@ got_a_slot:
 
     assert(vers2 == atomic_cas_64(&cfv->nxt_version, 0, 0) ||
            (vers2 + 1) == atomic_cas_64(&cfv->nxt_version, 0, 0));
+
+    /* Take the wrapped value for the slot we chose */
     nref = atomic_inc_32_nv(&v->wrapper->nref);
     assert(nref > 1);
     *version = v->wrapper->version;
@@ -395,18 +403,36 @@ got_a_slot:
     assert(*res != NULL);
 
     /*
-     * We'll release the previous wrapper and save the new one below,
-     * after releasing the slot it came from.
+     * We'll release the previous wrapper and save the new one in
+     * cfv->tkey below, after releasing the slot it came from.
      */
     wrapper = v->wrapper;
 
-    /* Release the slot(s) */
+    /*
+     * Release the slot(s) and signal any possible waiting writer if
+     * either slot's nreaders drops to zero (that's what the writer will
+     * be waiting for).
+     *
+     * The one blocking operation done by readers happens in
+     * signal_writer(), but that one blocking operation is for a lock
+     * that the writer will have or will soon have released, so it's
+     * a practically uncontended blocking operation.
+     */
     if (got_both_slots && atomic_dec_32_nv(&v->other->nreaders) == 0)
         do_signal_writer = 1;
     if (atomic_dec_32_nv(&v->nreaders) == 0 || do_signal_writer)
         err2 = signal_writer(cfv);
 
-    /* Release the value previously read in this thread, if any */
+    /*
+     * Release the value previously read in this thread, if any.
+     *
+     * Note that we call free() here, which means that we can take a
+     * lock.  The application's value destructor also can do the same.
+     *
+     * TODO/FIXME We could use a lock-less queue/stack to queue up
+     *            wrappers for destruction by writers, then readers
+     *            could be even more light-weight.
+     */
     if (*res != pthread_getspecific(cfv->tkey))
         pthread_cfvar_release_np(cfv);
 
@@ -524,7 +550,7 @@ pthread_cfvar_set_np(pthread_cfvar_np_t *cfv, void *cfdata,
     /* cfv->nxt_version is stable because we hold the write_lock */
     *new_version = wrapper->version = atomic_cas_64(&cfv->nxt_version, 0, 0);
 
-    /* Grab the next slot: the previous one to the current one */
+    /* Grab the next slot */
     v = cfv->vars[(*new_version + 1) & 0x1].other;
     old_wrapper = atomic_cas_ptr((volatile void **)&v->wrapper, NULL, NULL);
 
@@ -566,37 +592,17 @@ pthread_cfvar_set_np(pthread_cfvar_np_t *cfv, void *cfdata,
     while (atomic_cas_32(&v->nreaders, 0, 0) > 0) {
         /*
          * We have a separate lock for writing vs. waiting so that no
-         * other writer can steal our march.  We got here by winning the
-         * race for the writer lock, so we'll hold onto it, and thus
-         * avoid having to restart here.
+         * other writer can steal our march.  All writers will enter,
+         * all writers will finish.  We got here by winning the race for
+         * the writer lock, so we'll hold onto it, and thus avoid having
+         * to restart here.
          */
-#if 0
-        /*
-         * XXX For a while the reader logic for when to signal writers
-         * was busted and we needed a timedwait in the writer.
-         */
-        struct timespec tmout;
-        (void) clock_gettime(CLOCK_REALTIME, &tmout);
-        tmout.tv_nsec += 5000000; /* 5ms */
-        if (tmout.tv_nsec > 1000000000) {
-            tmout.tv_sec++;
-            tmout.tv_nsec %= 1000000000;
-        }
-        if ((err = pthread_cond_timedwait(&cfv->cv, &cfv->cv_lock)) != 0 &&
-            err != ETIMEDOUT) {
-            (void) pthread_mutex_unlock(&cfv->cv_lock);
-            (void) pthread_mutex_unlock(&cfv->write_lock);
-            free(wrapper);
-            return err;
-        }
-#else
         if ((err = pthread_cond_wait(&cfv->cv, &cfv->cv_lock)) != 0) {
             (void) pthread_mutex_unlock(&cfv->cv_lock);
             (void) pthread_mutex_unlock(&cfv->write_lock);
             free(wrapper);
             return err;
         }
-#endif
     }
     if ((err = pthread_mutex_unlock(&cfv->cv_lock)) != 0) {
         (void) pthread_mutex_unlock(&cfv->write_lock);
@@ -604,15 +610,13 @@ pthread_cfvar_set_np(pthread_cfvar_np_t *cfv, void *cfdata,
         return err;
     }
 
-    /* Update that now quiescent slot */
+    /* Update that now quiescent slot; these are the release operations */
     tmp = atomic_cas_ptr((volatile void **)&v->wrapper, old_wrapper, wrapper);
     assert(tmp == old_wrapper);
-
     v->version = *new_version;
     tmp_version = atomic_inc_64_nv(&cfv->nxt_version);
     assert(tmp_version == *new_version + 1);
-    assert(v->version > v->other->version || v->version == 0);
-    assert(v->version > v->other->version || v->other->version == 0);
+    assert(v->version > v->other->version);
 
     /* Release the old cf */
     assert(old_wrapper != NULL && old_wrapper->nref > 0);
