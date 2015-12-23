@@ -14,18 +14,23 @@
  * has a current value for the variable, and the other holds the
  * previous value and will hold the next value.
  *
- * An alternative design could have each thread "subscribe" a pair of
- * slots for itself and have the writers "publish" to each subscribed
- * thread.  The subsciption would require taking a lock once per-reader.
- * The publish operation would be very fast, and the read operation
- * would be very fast as well.  The read operation would consist of
- * checking if the not-current slot has a newer value, and if so
- * atomically change a current slot pointer, while the writer would
- * write to the current slot's other slot pointer.  This alternative
- * might be significantly simpler than the current design, though
- * writing becomes O(N), but then, writing would not block on any
- * readers.  Though maybe it wouldn't be simpler: it seems the atomic
- * composition issues in the current design would still remain.
+ * An alternative design could have a linked list where the head and the
+ * next pointers are the only things written to by the writer, and where
+ * all readers subscribe (possibly requiring a lock the first time they
+ * read).  In this alternative design the readers keep a single pointer
+ * to whatever linked list element they last picked, and the writer goes
+ * through all readers' selections to garbage collect the list.  Readers
+ * would only ever do an acquire read of the linked list head and a
+ * release write of their pointer to that element, while writers would
+ * only do plain reads of the readers' pointer and a release write of
+ * the linked list head.  The writer would mark each referenced list
+ * element (plus the newest one) as used while reading the subscribed
+ * readers' pointers, then it would fix the next pointers to remove the
+ * unreferenced elements, and then it would free the elements.  In this
+ * design writing is O(N), but readers are truly lock-less after the
+ * first read, and readers never malloc() nor free().  This sounds so
+ * much simpler than the design currently used that perhaps we should
+ * switch to it!
  */
 /*
  * There are several atomic compositions needed to make this work.
