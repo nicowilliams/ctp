@@ -13,24 +13,46 @@
  * The design for this implementation uses a pair of slots such that one
  * has a current value for the variable, and the other holds the
  * previous value and will hold the next value.
+ */
+/*
+ * Alternative Design
  *
  * An alternative design could have a linked list where the head and the
  * next pointers are the only things written to by the writer, and where
- * all readers subscribe (possibly requiring a lock the first time they
- * read).  In this alternative design the readers keep a single pointer
- * to whatever linked list element they last picked, and the writer goes
- * through all readers' selections to garbage collect the list.  Readers
- * would only ever do an acquire read of the linked list head and a
- * release write of their pointer to that element, while writers would
- * only do plain reads of the readers' pointer and a release write of
- * the linked list head.  The writer would mark each referenced list
- * element (plus the newest one) as used while reading the subscribed
- * readers' pointers, then it would fix the next pointers to remove the
- * unreferenced elements, and then it would free the elements.  In this
- * design writing is O(N), but readers are truly lock-less after the
- * first read, and readers never malloc() nor free().  This sounds so
- * much simpler than the design currently used that perhaps we should
- * switch to it!
+ * all readers "subscribe" and thence their state consists of a single
+ * pointer to what was at read-time the head of that linked list, with
+ * that pointer held where the writers can find it (in "subscription"
+ * slots) so they can garbage collect in order to release no-longer
+ * referenced values.
+ *
+ * Subscription can be lock-less.  There'd be a index into a logical
+ * array of subscription slots.  New reader threads would atomically
+ * increment a counter to determine their index into this array.  If the
+ * array index goes past the allocated array size, then the array would
+ * be grown.  The array could be maintained as a linked list of array
+ * chunks or as a tree of array chunks, either way, when a reader goes
+ * to grow it, it will either win the race or lose it, using an atomic
+ * CAS operation to perform the growth; losers free their chunk and then
+ * find their slot in the winner's chunk.
+ *
+ * Once subcribed, readers only ever do an acquire-fenced read on the
+ * head of the linked list of values, and write that to their slot with
+ * a release-fenced write.
+ *
+ * Writers only add new values at the head of the list, with the
+ * previous head as the next pointer of the new element.
+ *
+ * Writers also mark-and-sweep garbage collect the extant list by
+ * reading every subscribed thread's pointer with an acquire-fenced
+ * read, marking all in-use values as such, then the writer releases and
+ * removes from the list those elements not marked as in-used.  Readers
+ * never read the next pointers of the list's elements.
+ *
+ * Readers do two fenced memory operations.  Writers do N fenced memory
+ * operations plus the writer lock acquire/release and any locks
+ * required to allocate and free list elements.  Readers may have to
+ * allocate the first time they read, but not thereafter.  No
+ * thread-specific is needed.
  */
 /*
  * There are several atomic compositions needed to make this work.
