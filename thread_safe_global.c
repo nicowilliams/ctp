@@ -127,6 +127,7 @@
 #include "thread_safe_global.h"
 #include "atomics.h"
 
+#ifdef USE_TSGV_SLOT_PAIR_DESIGN
 static void
 wrapper_free(struct vwrapper *wrapper)
 {
@@ -654,3 +655,89 @@ pthread_var_set_np(pthread_var_np_t vp, void *cfdata,
     /* Done */
     return pthread_mutex_unlock(&vp->write_lock);
 }
+
+#else /* USE_TSGV_SLOT_PAIR_DESIGN */
+
+#ifndef USE_TSGV_SUBSCRIPTION_SLOTS_DESIGN
+#error "wat"
+#endif
+
+/**
+ * Initialize a thread-safe global variable
+ *
+ * A thread-safe global variable stores a current value, a pointer to
+ * void, which may be set and read.  A value read from a thread-safe
+ * global variable will be valid in the thread that read it, and will
+ * remain valid until released or until the thread-safe global variable
+ * is read again in the same thread.  New values may be set.  Values
+ * will be destroyed with the destructor provided when no references
+ * remain.
+ *
+ * @param var Pointer to thread-safe global variable
+ * @param dtor Pointer to thread-safe global value destructor function
+ *
+ * @return Returns zero on success, else a system error number
+ */
+int
+pthread_var_init_np(pthread_var_np_t *vpp,
+                    pthread_var_destructor_np_t dtor)
+
+/**
+ * Destroy a thread-safe global variable
+ *
+ * It is the caller's responsibility to ensure that no thread is using
+ * this var and that none will use it again.
+ *
+ * @param [in] var The thread-safe global variable to destroy
+ */
+void
+pthread_var_destroy_np(pthread_var_np_t vp)
+
+static int
+signal_writer(pthread_var_np_t vp)
+
+/**
+ * Get the most up to date value of the given cf var.
+ *
+ * @param [in] var Pointer to a cf var
+ * @param [out] res Pointer to location where the variable's value will be output
+ * @param [out] version Pointer (may be NULL) to 64-bit integer where the current version will be output
+ *
+ * @return Zero on success, a system error code otherwise
+ */
+int
+pthread_var_get_np(pthread_var_np_t vp, void **res, uint64_t *version)
+
+/**
+ * Wait for a var to have its first value set.
+ *
+ * @param vp [in] The vp to wait for
+ *
+ * @return Zero on success, else a system error
+ */
+int
+pthread_var_wait_np(pthread_var_np_t vp)
+
+/**
+ * Release this thread's reference (if it holds one) to the current
+ * value of the given thread-safe global variable.
+ *
+ * @param vp [in] A thread-safe global variable
+ */
+void
+pthread_var_release_np(pthread_var_np_t vp)
+
+/**
+ * Set new data on a thread-safe global variable
+ *
+ * @param [in] var Pointer to thread-safe global variable
+ * @param [in] cfdata New value for the thread-safe global variable
+ * @param [out] new_version New version number
+ *
+ * @return 0 on success, or a system error such as ENOMEM.
+ */
+int
+pthread_var_set_np(pthread_var_np_t vp, void *cfdata,
+                     uint64_t *new_version)
+
+#endif /* USE_TSGV_SLOT_PAIR_DESIGN */
