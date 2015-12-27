@@ -123,6 +123,7 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include "thread_safe_global_priv.h"
 #include "thread_safe_global.h"
 #include "atomics.h"
 
@@ -162,12 +163,13 @@ var_dtor_wrapper(void *wrapper)
  * @return Returns zero on success, else a system error number
  */
 int
-pthread_var_init_np(pthread_var_np_t *vp,
-                      pthread_var_destructor_np_t dtor)
+pthread_var_init_np(pthread_var_np_t *vpp,
+                    pthread_var_destructor_np_t dtor)
 {
+    pthread_var_np_t vp;
     int err;
 
-    memset(vp, 0, sizeof(*vp));
+    vp = calloc(1, sizeof(*vp));
 
     /*
      * The thread-local key is used to hold a reference for destruction
@@ -229,6 +231,8 @@ pthread_var_init_np(pthread_var_np_t *vp,
     vp->vars[1].wrapper = NULL;
     vp->vars[1].other = &vp->vars[0]; /* other pointer never changes */
     vp->dtor = dtor;
+
+    *vpp = vp;
     return 0;
 }
 
@@ -241,7 +245,7 @@ pthread_var_init_np(pthread_var_np_t *vp,
  * @param [in] var The thread-safe global variable to destroy
  */
 void
-pthread_var_destroy_np(pthread_var_np_t *vp)
+pthread_var_destroy_np(pthread_var_np_t vp)
 {
     if (vp == 0)
         return;
@@ -265,7 +269,7 @@ pthread_var_destroy_np(pthread_var_np_t *vp)
 }
 
 static int
-signal_writer(pthread_var_np_t *vp)
+signal_writer(pthread_var_np_t vp)
 {
     int err;
 
@@ -285,11 +289,8 @@ signal_writer(pthread_var_np_t *vp)
  *
  * @return Zero on success, a system error code otherwise
  */
-int pthread_var_init_np(pthread_var_np_t *, pthread_var_destructor_np_t);
-void pthread_var_destroy_np(pthread_var_np_t *);
-int pthread_var_get_np(pthread_var_np_t *, void **, uint64_t *);
 int
-pthread_var_get_np(pthread_var_np_t *vp, void **res, uint64_t *version)
+pthread_var_get_np(pthread_var_np_t vp, void **res, uint64_t *version)
 {
     int err = 0;
     int err2 = 0;
@@ -477,7 +478,7 @@ got_a_slot:
  * @return Zero on success, else a system error
  */
 int
-pthread_var_wait_np(pthread_var_np_t *vp)
+pthread_var_wait_np(pthread_var_np_t vp)
 {
     void *junk;
     int err;
@@ -515,7 +516,7 @@ pthread_var_wait_np(pthread_var_np_t *vp)
  * @param vp [in] A thread-safe global variable
  */
 void
-pthread_var_release_np(pthread_var_np_t *vp)
+pthread_var_release_np(pthread_var_np_t vp)
 {
     struct vwrapper *wrapper = pthread_getspecific(vp->tkey);
 
@@ -537,7 +538,7 @@ pthread_var_release_np(pthread_var_np_t *vp)
  * @return 0 on success, or a system error such as ENOMEM.
  */
 int
-pthread_var_set_np(pthread_var_np_t *vp, void *cfdata,
+pthread_var_set_np(pthread_var_np_t vp, void *cfdata,
                      uint64_t *new_version)
 {
     int err;

@@ -79,13 +79,13 @@ main(int argc, char **argv)
         if ((errno = pthread_cond_wait(&exit_cv, &exit_cv_lock)) != 0)
             err(1, "pthread_cond_wait(&exit_cv, &exit_cv_lock) failed");
         if (nthreads == NREADERS) {
-            if ((errno = pthread_var_set_np(&var, magic_exit, &version)) != 0)
+            if ((errno = pthread_var_set_np(var, magic_exit, &version)) != 0)
                 err(1, "pthread_var_set_np failed");
             printf("\nTold readers to exit.\n");
         }
     }
     (void) pthread_mutex_unlock(&exit_cv_lock);
-    pthread_var_destroy_np(&var);
+    pthread_var_destroy_np(var);
     return 0;
 }
 
@@ -111,13 +111,13 @@ reader(void *data)
 
     printf("Reader (%jd) will sleep %uus between runs\n", (intmax_t)thread_num, us);
 
-    if ((errno = pthread_var_wait_np(&var)) != 0)
-        err(1, "pthread_var_wait_np(&var) failed");
+    if ((errno = pthread_var_wait_np(var)) != 0)
+        err(1, "pthread_var_wait_np(var) failed");
 
     for (;;) {
         assert(rruns == (*(runs[thread_num])));
-        if ((errno = pthread_var_get_np(&var, &p, &version)) != 0)
-            err(1, "pthread_var_get_np(&var) failed");
+        if ((errno = pthread_var_get_np(var, &p, &version)) != 0)
+            err(1, "pthread_var_get_np(var) failed");
 
         if (version < last_version)
             err(1, "version went backwards for this reader!");
@@ -180,8 +180,8 @@ writer(void *data)
         if ((p = malloc(sizeof(*p))) == NULL)
             err(1, "malloc() failed");
         *p = MAGIC_INITED;
-        if ((errno = pthread_var_set_np(&var, p, &version)) != 0)
-            err(1, "pthread_var_set_np(&var) failed");
+        if ((errno = pthread_var_set_np(var, p, &version)) != 0)
+            err(1, "pthread_var_set_np(var) failed");
         if (version < last_version)
             err(1, "version went backwards for this writer!");
         last_version = version;
