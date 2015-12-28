@@ -659,8 +659,8 @@ get_slot(pthread_var_np_t vp, uint32_t slot_idx)
     if (nslots <= slot_idx)
         return NULL;
 
-    assert(slot_idx - (nslots - slots->slot_count) < slots->slot_count);
-    return &slots->slot_array[slot_idx - (nslots - slots->slot_count)];
+    assert(slot_idx - slots->slot_base < slots->slot_count);
+    return &slots->slot_array[slot_idx - slots->slot_base];
 }
 
 static int
@@ -698,9 +698,11 @@ grow_slots(pthread_var_np_t vp, uint32_t slot_idx, int tries)
         return errno;
     }
     new_slots->slot_count = additions;
+    new_slots->slot_base = nslots;
     for (i = 0; i < additions; i++) {
         new_slots->slot_array[i].value = 0;
         new_slots->slot_array[i].in_use = 0;
+        new_slots->slot_array[i].vp = vp;
     }
 
     /* Reserve the slot we wanted */
@@ -721,6 +723,39 @@ grow_slots(pthread_var_np_t vp, uint32_t slot_idx, int tries)
     return grow_slots(vp, slot_idx, tries - 1);
 }
 
+static void
+destroy_var(pthread_var_np_t vp)
+{
+    struct slots *slots;
+    struct value *val;
+
+    if (vp == 0)
+        return;
+
+    pthread_mutex_lock(&vp->write_lock);
+
+    while (vp->values != NULL) {
+        val = vp->values;
+        vp->values = val->next;
+        if (vp->dtor != NULL)
+            vp->dtor(val->value);
+        free(val);
+    }
+    while (vp->slots != NULL) {
+        slots = vp->slots;
+        vp->slots = slots->next;
+        free(slots->slot_array);
+        free(slots);
+    }
+    vp->dtor = NULL;
+
+    pthread_mutex_unlock(&vp->write_lock);
+    pthread_mutex_destroy(&vp->write_lock);
+    pthread_mutex_destroy(&vp->waiter_lock);
+    pthread_cond_destroy(&vp->waiter_cv);
+    /* XXX We leak var->tkey! */
+}
+
 void
 release_slot(void *data)
 {
@@ -729,11 +764,13 @@ release_slot(void *data)
     if (slot == NULL)
         return;
 
-    /* Relase value */
+    /* Release value */
     atomic_write_ptr((volatile void **)&slot->value, NULL);
 
     /* Release slot */
     atomic_write_32(&slot->in_use, 0);
+    if (atomic_dec_32_nv(&slot->vp->slots_in_use) == 0)
+        destroy_var(slot->vp);
 }
 
 /**
@@ -766,6 +803,7 @@ pthread_var_init_np(pthread_var_np_t *vpp,
     vp->values = NULL;
     vp->slots = NULL;
     vp->dtor = dtor;
+    vp->slots_in_use = 1;
 
     if ((err = pthread_key_create(&vp->tkey, release_slot)) != 0) {
         memset(vp, 0, sizeof(*vp));
@@ -809,30 +847,11 @@ pthread_var_init_np(pthread_var_np_t *vpp,
 void
 pthread_var_destroy_np(pthread_var_np_t vp)
 {
-    struct slots *slots;
-    struct value *val;
     if (vp == 0)
         return;
-
-    pthread_var_release_np(vp);
-    pthread_mutex_lock(&vp->write_lock); /* There'd better not be readers */
-    pthread_mutex_unlock(&vp->write_lock);
-    while (vp->values != NULL) {
-        val = vp->values;
-        vp->values = val->next;
-        if (vp->dtor != NULL)
-            vp->dtor(val->value);
-        free(val);
-    }
-    while (vp->slots != NULL) {
-        slots = vp->slots;
-        vp->slots = slots->next;
-        free(slots->slot_array);
-        free(slots);
-    }
-    vp->dtor = NULL;
-    pthread_mutex_destroy(&vp->write_lock);
-    /* XXX We leak var->tkey! */
+    if (atomic_dec_32_nv(&vp->slots_in_use) > 0)
+        return;
+    destroy_var(vp);
 }
 
 /**
@@ -849,6 +868,7 @@ pthread_var_get_np(pthread_var_np_t vp, void **res, uint64_t *version)
 {
     int err = 0;
     uint32_t slot_idx;
+    uint32_t slots_in_use;
     uint64_t vers;
     struct slot *slot;
     struct value *newest;
@@ -876,6 +896,9 @@ pthread_var_get_np(pthread_var_np_t vp, void **res, uint64_t *version)
             }
             /* Lost it; repeat */
         }
+        assert(slot->vp == vp);
+        slots_in_use = atomic_inc_32_nv(&vp->slots_in_use);
+        assert(slots_in_use > 1);
         if ((err = pthread_setspecific(vp->tkey, slot)) != 0)
             return err;
     }
@@ -924,6 +947,7 @@ pthread_var_set_np(pthread_var_np_t vp, void *data,
     struct value *new_value;
     struct value *value;
     struct value **p; /* Pointer to list/sub-list head */
+    struct slots *slots;
     struct slot *slot;
     uint32_t max_slot;
     uint32_t i;
@@ -959,13 +983,17 @@ pthread_var_set_np(pthread_var_np_t vp, void *data,
     /* Now comes the slow part: garbage collect vp->values */
 
     /* Mark */
-    vp->values->in_use = 1; /* curr value is always in use, never collected */
+    vp->values->referenced = 1; /* curr value is always in use */
     max_slot = atomic_read_32(&vp->next_slot_idx);
-    for (i = 0; i < max_slot; i++) {
-        /* XXX This is quadratic; optimize */
-        slot = get_slot(vp, i);
+    for (i = 0, slots = vp->slots; i < max_slot; i++) {
+        assert(slots != NULL);
+        if (i >= slots->slot_base + slots->slot_count) {
+            slots = slots->next;
+            assert(slots != NULL);
+        }
+        slot = &slots->slot_array[i - slots->slot_base];
         if ((value = atomic_read_ptr((volatile void **)&slot->value)) != NULL)
-            value->in_use = 1;
+            value->referenced = 1;
     }
 
     /*
@@ -977,7 +1005,7 @@ pthread_var_set_np(pthread_var_np_t vp, void *data,
     for (p = &vp->values; *p != NULL;) {
         value = *p;
 
-        if (!value->in_use) {
+        if (!value->referenced) {
             /* Remove from list */
             assert(value != new_value);
             *p = value->next;
@@ -989,7 +1017,7 @@ pthread_var_set_np(pthread_var_np_t vp, void *data,
         }
 
         /* Clear */
-        value->in_use = 0;
+        value->referenced = 0;
 
         /* Step into this value's next sub-list */
         p = &value->next;

@@ -54,12 +54,13 @@ struct value {
     struct value        *next;
     void                *value;
     uint64_t            version;
-    uint32_t            in_use;
+    uint32_t            referenced;
 };
 
 struct slot {
     struct value        *value;
     uint32_t            in_use;
+    pthread_var_np_t    vp;
     /* We could add a pthread_t here */
 };
 
@@ -67,6 +68,7 @@ struct slots {
     struct slots        *next;          /* atomic */
     struct slot         *slot_array;    /* atomic */
     uint32_t            slot_count;     /* atomic */
+    uint32_t            slot_base;
 };
 
 struct pthread_var_np {
