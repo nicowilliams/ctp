@@ -102,6 +102,12 @@
  *            more convenient and natural API to boot.
  *
  *            In any case: first make it work, then optimize.
+ *
+ * FWIW, there are 10 atomic_cas_{32,64,ptr}() calls which can be
+ * replaced with atomic_read_{32,64,ptr}().
+ *
+ * TODO Write a test program using read-write locks instead of this API
+ *      so we can compare performance for the two.
  */
 
 /*
@@ -109,7 +115,10 @@
  *
  *  - Use a single global thread-specific key, not a per-variable one.
  *
- *    This is important as otherwise we leak thread-specific keys.
+ *    This is important as otherwise we leak thread-specific keys.  But
+ *    only mildly important: there will be a small number of thread-safe
+ *    global variables in use anyways -- a number comparable to thread
+ *    keys.
  *
  *  - Add a getter that gets the value saved in a thread-local, rather
  *    than a fresh value.  Or make this an argument to the get function.
