@@ -51,26 +51,34 @@ struct pthread_var_np {
 #endif
 
 struct value {
-    void                *value;
     struct value        *next;
+    void                *value;
+    uint64_t            version;
+    uint32_t            in_use;
 };
 
 struct slot {
+    struct value        *value;
+    uint32_t            in_use;
+    /* We could add a pthread_t here */
 };
 
 struct slots {
+    struct slots        *next;          /* atomic */
     struct slot         *slot_array;    /* atomic */
-    size_t              slot_count;     /* atomic */
+    uint32_t            slot_count;     /* atomic */
 };
 
 struct pthread_var_np {
+    pthread_key_t       tkey;           /* to detect thread exits */
     pthread_mutex_t     write_lock;
     pthread_mutex_t     waiter_lock;
     pthread_cond_t      waiter_cv;
     var_dtor_t          dtor;
     struct value        *values;        /* atomic */
-    struct slots        slots;
-    size_t              next_slot_idx;  /* atomic */
+    struct slots        *slots;
+    uint32_t            next_slot_idx;  /* atomic */
+    uint32_t            slots_in_use;
 };
 
 #endif

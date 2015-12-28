@@ -170,7 +170,9 @@ pthread_var_init_np(pthread_var_np_t *vpp,
     pthread_var_np_t vp;
     int err;
 
-    vp = calloc(1, sizeof(*vp));
+    *vpp = NULL;
+    if ((vp = calloc(1, sizeof(*vp))) == NULL)
+        return errno;
 
     /*
      * The thread-local key is used to hold a reference for destruction
@@ -469,45 +471,6 @@ got_a_slot:
 }
 
 /**
- * Wait for a var to have its first value set.
- *
- * @param vp [in] The vp to wait for
- *
- * @return Zero on success, else a system error
- */
-int
-pthread_var_wait_np(pthread_var_np_t vp)
-{
-    void *junk;
-    int err;
-
-    if ((err = pthread_var_get_np(vp, &junk, NULL)) == 0 && junk != NULL)
-        return 0;
-
-    if ((err = pthread_mutex_lock(&vp->waiter_lock)) != 0)
-        return err;
-
-    while ((err = pthread_var_get_np(vp, &junk, NULL)) == 0 &&
-           junk == NULL) {
-        if ((err = pthread_cond_wait(&vp->waiter_cv,
-                                     &vp->waiter_lock)) != 0) {
-            (void) pthread_mutex_unlock(&vp->waiter_lock);
-            return err;
-        }
-    }
-
-    /*
-     * The first writer signals, rather than broadcase, to avoid a
-     * thundering herd.  We propagate the signal here so the rest of the
-     * herd wakes, one at a time.
-     */
-    (void) pthread_cond_signal(&vp->waiter_cv);
-    if ((err = pthread_mutex_unlock(&vp->waiter_lock)) != 0)
-        return err;
-    return err;
-}
-
-/**
  * Release this thread's reference (if it holds one) to the current
  * value of the given thread-safe global variable.
  *
@@ -659,6 +622,120 @@ pthread_var_set_np(pthread_var_np_t vp, void *cfdata,
 #error "wat"
 #endif
 
+static struct slot *
+get_free_slot(pthread_var_np_t vp)
+{
+    struct slots *slots = atomic_read_ptr((volatile void **)&vp->slots);
+    struct slot *slot;
+    size_t i;
+
+    for (; slots != NULL; slots = slots->next) {
+        for (i = 0; i < slots->slot_count; i++) {
+            slot = &slots->slot_array[i];
+            /* This unprotected read of slot->in_use is an optimization */
+            if (slot->in_use)
+                continue;
+            if (atomic_cas_32(&slot->in_use, 0, 1) == 0)
+                return slot;
+        }
+    }
+    return NULL;
+}
+
+static struct slot *
+get_slot(pthread_var_np_t vp, uint32_t slot_idx)
+{
+    struct slots *slots;
+    uint32_t nslots = 0;
+
+    for (slots = atomic_read_ptr((volatile void **)&vp->slots);
+         slots != NULL;
+         slots = atomic_read_ptr((volatile void **)&slots->next)) {
+        nslots += slots->slot_count;
+        if (nslots > slot_idx)
+            break;
+    }
+
+    if (nslots <= slot_idx)
+        return NULL;
+
+    assert(slot_idx - (nslots - slots->slot_count) < slots->slot_count);
+    return &slots->slot_array[slot_idx - (nslots - slots->slot_count)];
+}
+
+static int
+grow_slots(pthread_var_np_t vp, uint32_t slot_idx, int tries)
+{
+    uint32_t nslots = 0;
+    uint32_t additions = 4;
+    uint32_t i;
+    struct slots **slotsp;
+    struct slots *new_slots;
+
+    /*
+     * Here we do a number of non-atomic reads, but it's OK to race;
+     * we'll make it right below.
+     */
+    for (slotsp = &vp->slots; *slotsp != NULL; slotsp = &(*slotsp)->next)
+        nslots += (*slotsp)->slot_count;
+
+    if (nslots > slot_idx)
+        return 0;
+
+    if (tries < 1)
+        return EAGAIN;
+
+    if ((new_slots = calloc(1, sizeof(*new_slots))) == NULL)
+        return errno;
+
+    while (nslots + additions < slot_idx)
+        additions *= 2;
+    assert(slot_idx - nslots < additions);
+
+    new_slots->slot_array = calloc(additions, sizeof(*new_slots->slot_array));
+    if (new_slots->slot_array == NULL) {
+        free(new_slots);
+        return errno;
+    }
+    new_slots->slot_count = additions;
+    for (i = 0; i < additions; i++) {
+        new_slots->slot_array[i].value = 0;
+        new_slots->slot_array[i].in_use = 0;
+    }
+
+    /* Reserve the slot we wanted */
+    atomic_write_32(&new_slots->slot_array[slot_idx - nslots].in_use, 1);
+
+    if (atomic_cas_ptr((volatile void **)slotsp, NULL, new_slots) != NULL) {
+        free(new_slots->slot_array);
+        free(new_slots);
+        return 0;
+    }
+
+    /* We lost a race to grow the array */
+
+    /*
+     * Tail recurse to repeat.  Note that the CAS above has made the
+     * current subscription slot state visible to the repetition.
+     */
+    return grow_slots(vp, slot_idx, tries - 1);
+}
+
+void
+release_slot(void *data)
+{
+    struct slot *slot = data;
+
+    if (slot == NULL)
+        return;
+
+    /* Relase value */
+    atomic_write_ptr((volatile void **)&slot->value, NULL);
+
+    /* Release slot */
+    atomic_write_32(&slot->in_use, 0);
+}
+
 /**
  * Initialize a thread-safe global variable
  *
@@ -678,6 +755,48 @@ pthread_var_set_np(pthread_var_np_t vp, void *cfdata,
 int
 pthread_var_init_np(pthread_var_np_t *vpp,
                     pthread_var_destructor_np_t dtor)
+{
+    pthread_var_np_t vp;
+    int err;
+
+    *vpp = NULL;
+    if ((vp = calloc(1, sizeof(*vp))) == NULL)
+        return errno;
+
+    vp->values = NULL;
+    vp->slots = NULL;
+    vp->dtor = dtor;
+
+    if ((err = pthread_key_create(&vp->tkey, release_slot)) != 0) {
+        memset(vp, 0, sizeof(*vp));
+        return err;
+    }
+    if ((err = pthread_mutex_init(&vp->write_lock, NULL)) != 0) {
+        memset(vp, 0, sizeof(*vp));
+        return err;
+    }
+    if ((err = pthread_mutex_init(&vp->waiter_lock, NULL)) != 0) {
+        pthread_mutex_destroy(&vp->write_lock);
+        memset(vp, 0, sizeof(*vp));
+        return err;
+    }
+    if ((err = pthread_cond_init(&vp->waiter_cv, NULL)) != 0) {
+        pthread_mutex_destroy(&vp->write_lock);
+        pthread_mutex_destroy(&vp->waiter_lock);
+        memset(vp, 0, sizeof(*vp));
+        return err;
+    }
+
+    if ((err = grow_slots(vp, 3, 1)) != 0) {
+        pthread_var_destroy_np(vp);
+        return err;
+    }
+
+    assert(get_slot(vp, 0) != NULL);
+
+    *vpp = vp;
+    return 0;
+}
 
 /**
  * Destroy a thread-safe global variable
@@ -689,9 +808,32 @@ pthread_var_init_np(pthread_var_np_t *vpp,
  */
 void
 pthread_var_destroy_np(pthread_var_np_t vp)
+{
+    struct slots *slots;
+    struct value *val;
+    if (vp == 0)
+        return;
 
-static int
-signal_writer(pthread_var_np_t vp)
+    pthread_var_release_np(vp);
+    pthread_mutex_lock(&vp->write_lock); /* There'd better not be readers */
+    pthread_mutex_unlock(&vp->write_lock);
+    while (vp->values != NULL) {
+        val = vp->values;
+        vp->values = val->next;
+        if (vp->dtor != NULL)
+            vp->dtor(val->value);
+        free(val);
+    }
+    while (vp->slots != NULL) {
+        slots = vp->slots;
+        vp->slots = slots->next;
+        free(slots->slot_array);
+        free(slots);
+    }
+    vp->dtor = NULL;
+    pthread_mutex_destroy(&vp->write_lock);
+    /* XXX We leak var->tkey! */
+}
 
 /**
  * Get the most up to date value of the given cf var.
@@ -704,16 +846,51 @@ signal_writer(pthread_var_np_t vp)
  */
 int
 pthread_var_get_np(pthread_var_np_t vp, void **res, uint64_t *version)
+{
+    int err = 0;
+    uint32_t slot_idx;
+    uint64_t vers;
+    struct slot *slot;
+    struct value *newest;
 
-/**
- * Wait for a var to have its first value set.
- *
- * @param vp [in] The vp to wait for
- *
- * @return Zero on success, else a system error
- */
-int
-pthread_var_wait_np(pthread_var_np_t vp)
+    if (version == NULL)
+        version = &vers;
+    *version = 0;
+    *res = NULL;
+
+    if ((slot = pthread_getspecific(vp->tkey)) == NULL) {
+        /* First time for this thread -> slow path (subscribe thread) */
+        while ((slot = get_free_slot(vp)) == NULL) {
+            /* Slower path still: grow slots array list */
+            slot_idx = atomic_inc_32_nv(&vp->next_slot_idx) - 1;
+            err = grow_slots(vp, slot_idx, 2);
+            assert(err == 0);
+            slot = get_slot(vp, slot_idx);
+            assert(slot != NULL);
+
+            /* We might have lost a race */
+            if (atomic_cas_32(&slot->in_use, 0, 1) == 0) {
+                /* Won it */
+                slot->value = NULL;
+                break;
+            }
+            /* Lost it; repeat */
+        }
+        if ((err = pthread_setspecific(vp->tkey, slot)) != 0)
+            return err;
+    }
+
+    /* Else/Then fast path with one acquire read and one release write */
+    if (slot->value != (newest = atomic_read_ptr((volatile void **)&vp->values)))
+        atomic_write_ptr((volatile void **)&slot->value, newest);
+
+    if (slot->value != NULL) {
+        *res = slot->value->value;
+        *version = slot->value->version;
+    }
+
+    return 0;
+}
 
 /**
  * Release this thread's reference (if it holds one) to the current
@@ -722,7 +899,14 @@ pthread_var_wait_np(pthread_var_np_t vp)
  * @param vp [in] A thread-safe global variable
  */
 void
-pthread_var_release_np(pthread_var_np_t vp)
+pthread_var_release_np(pthread_var_np_t vp) {
+    struct slot *slot;
+
+    if ((slot = pthread_getspecific(vp->tkey)) == NULL)
+        return;
+    atomic_write_ptr((volatile void **)&slot->value, NULL);
+    atomic_write_32(&slot->in_use, 0);
+}
 
 /**
  * Set new data on a thread-safe global variable
@@ -734,7 +918,134 @@ pthread_var_release_np(pthread_var_np_t vp)
  * @return 0 on success, or a system error such as ENOMEM.
  */
 int
-pthread_var_set_np(pthread_var_np_t vp, void *cfdata,
+pthread_var_set_np(pthread_var_np_t vp, void *data,
                      uint64_t *new_version)
+{
+    struct value *new_value;
+    struct value *value;
+    struct value **p; /* Pointer to list/sub-list head */
+    struct slot *slot;
+    uint32_t max_slot;
+    uint32_t i;
+    uint64_t vers;
+    int err;
+
+    if (new_version == NULL)
+        new_version = &vers;
+
+    *new_version = 0;
+
+    if ((new_value = calloc(1, sizeof(*new_value))) == NULL)
+        return errno;
+
+
+    if ((err = pthread_mutex_lock(&vp->write_lock)) != 0) {
+        free(new_value);
+        return err;
+    }
+
+    new_value->value = data;
+    new_value->next = vp->values;
+    if (new_value->next == NULL)
+        new_value->version = 1;
+    else
+        new_value->version = new_value->next->version + 1;
+
+    *new_version = new_value->version;
+
+    /* Publish the new value */
+    atomic_write_ptr((volatile void **)&vp->values, new_value);
+
+    /* Now comes the slow part: garbage collect vp->values */
+
+    /* Mark */
+    vp->values->in_use = 1; /* curr value is always in use, never collected */
+    max_slot = atomic_read_32(&vp->next_slot_idx);
+    for (i = 0; i < max_slot; i++) {
+        /* XXX This is quadratic; optimize */
+        slot = get_slot(vp, i);
+        if ((value = atomic_read_ptr((volatile void **)&slot->value)) != NULL)
+            value->in_use = 1;
+    }
+
+    /*
+     * Any new readers past max_slot will be reading the newly-published
+     * value, thus we don't need to consider them.
+     */
+
+    /* Sweep */
+    for (p = &vp->values; *p != NULL;) {
+        value = *p;
+
+        if (!value->in_use) {
+            /* Remove from list */
+            assert(value != new_value);
+            *p = value->next;
+            vp->dtor(value->value);
+            free(value);
+
+            /* Sweep new [sub-]list */
+            continue;
+        }
+
+        /* Clear */
+        value->in_use = 0;
+
+        /* Step into this value's next sub-list */
+        p = &value->next;
+        assert(p != &vp->values);
+    }
+
+    if (*new_version < 2) {
+        /* Signal waiters */
+        (void) pthread_mutex_lock(&vp->waiter_lock);
+        (void) pthread_cond_signal(&vp->waiter_cv); /* no thundering herd */
+        (void) pthread_mutex_unlock(&vp->waiter_lock);
+    }
+
+    pthread_mutex_unlock(&vp->write_lock);
+    return 0;
+}
 
 #endif /* USE_TSGV_SLOT_PAIR_DESIGN */
+
+/* Code common to both implementations */
+
+/**
+ * Wait for a var to have its first value set.
+ *
+ * @param vp [in] The vp to wait for
+ *
+ * @return Zero on success, else a system error
+ */
+int
+pthread_var_wait_np(pthread_var_np_t vp)
+{
+    void *junk;
+    int err;
+
+    if ((err = pthread_var_get_np(vp, &junk, NULL)) == 0 && junk != NULL)
+        return 0;
+
+    if ((err = pthread_mutex_lock(&vp->waiter_lock)) != 0)
+        return err;
+
+    while ((err = pthread_var_get_np(vp, &junk, NULL)) == 0 &&
+           junk == NULL) {
+        if ((err = pthread_cond_wait(&vp->waiter_cv,
+                                     &vp->waiter_lock)) != 0) {
+            (void) pthread_mutex_unlock(&vp->waiter_lock);
+            return err;
+        }
+    }
+
+    /*
+     * The first writer signals, rather than broadcase, to avoid a
+     * thundering herd.  We propagate the signal here so the rest of the
+     * herd wakes, one at a time.
+     */
+    (void) pthread_cond_signal(&vp->waiter_cv);
+    if ((err = pthread_mutex_unlock(&vp->waiter_lock)) != 0)
+        return err;
+    return err;
+}
