@@ -28,28 +28,37 @@
  *     - estimated time per write
  */
 
-#define timeadd(a, b, result)                           \
-  do {                                                  \
-    (result)->tv_sec = (a)->tv_sec + (b)->tv_sec;       \
-    (result)->tv_nsec = (a)->tv_nsec + (b)->tv_nsec;    \
-    if ((result)->tv_nsec >= 1000000000)                \
-      {                                                 \
-        ++(result)->tv_sec;                             \
-        (result)->tv_nsec -= 1000000000;                \
-      }                                                 \
-  } while (0)
+struct timespec
+timeadd(struct timespec a, struct timespec b)
+{
+    struct timespec r;
 
+    a.tv_nsec %= 1000000000;
+    b.tv_nsec %= 1000000000;
+    r.tv_sec = a.tv_sec + b.tv_sec;
+    r.tv_nsec = a.tv_nsec + b.tv_nsec;
+    if (r.tv_nsec > 1000000000) {
+        r.tv_sec++;
+        r.tv_nsec -= 1000000000;
+    }
+    return r;
+}
 
-#define timesub(a, b, result)                           \
-  do {                                                  \
-    (result)->tv_sec = (a)->tv_sec - (b)->tv_sec;       \
-    (result)->tv_nsec = (a)->tv_nsec - (b)->tv_nsec;    \
-    if ((result)->tv_nsec < 0) {                        \
-      --(result)->tv_sec;                               \
-      (result)->tv_nsec += 1000000000;                  \
-    }                                                   \
-  } while (0)
+struct timespec
+timesub(struct timespec a, struct timespec b)
+{
+    struct timespec r;
 
+    a.tv_nsec %= 1000000000;
+    b.tv_nsec %= 1000000000;
+    r.tv_sec = a.tv_sec - b.tv_sec;
+    r.tv_nsec = a.tv_nsec - b.tv_nsec;
+    if (r.tv_nsec < 1000000000) {
+        r.tv_sec--;
+        r.tv_nsec += 1000000000;
+    }
+    return r;
+}
 
 static void *reader(void *data);
 static void *writer(void *data);
@@ -91,6 +100,7 @@ main(int argc, char **argv)
     struct timespec sleeptime;
     uint64_t rruns = 0;
     uint64_t wruns = 0;
+    double usperrun;
 
     if ((magic_exit = malloc(sizeof(*magic_exit))) == NULL)
         err(1, "malloc failed");
@@ -141,7 +151,7 @@ main(int argc, char **argv)
     if (clock_gettime(CLOCK_MONOTONIC, &endtime) != 0)
         err(1, "clock_gettime(CLOCK_MONOTONIC) failed");
 
-    timesub(&endtime, &starttime, &runtime);
+    runtime = timesub(endtime, starttime);
 
     (void) pthread_mutex_unlock(&exit_cv_lock);
     pthread_var_destroy_np(var);
@@ -154,8 +164,8 @@ main(int argc, char **argv)
     sleeptime.tv_sec = 0;
     sleeptime.tv_nsec = 0;
     for (i = 0; i < NREADERS; i++) {
-        timeadd(&runtime, &runtimes[i], &runtime);
-        timeadd(&sleeptime, &sleeptimes[i], &sleeptime);
+        runtime = timeadd(runtime, runtimes[i]);
+        sleeptime = timeadd(sleeptime, sleeptimes[i]);
         rruns += *(runs[i]);
     }
     printf("Read runs: %ju, read runtimes: %jus, %juns "
@@ -165,14 +175,18 @@ main(int argc, char **argv)
            (uintmax_t)runtime.tv_nsec / NREADERS,
            (uintmax_t)sleeptime.tv_sec / NREADERS,
            (uintmax_t)sleeptime.tv_nsec / NREADERS);
+    usperrun = (runtime.tv_sec * 1000000) / NREADERS +
+               (runtime.tv_nsec / 1000) / NREADERS;
+    usperrun /= rruns;
+    printf("Average read time: %fus\n", usperrun);
 
     runtime.tv_sec = 0;
     runtime.tv_nsec = 0;
     sleeptime.tv_sec = 0;
     sleeptime.tv_nsec = 0;
     for (i = 0; i < NWRITERS; i++) {
-        timeadd(&runtime, &runtimes[NREADERS + i], &runtime);
-        timeadd(&sleeptime, &sleeptimes[NREADERS + i], &sleeptime);
+        runtime = timeadd(runtime, runtimes[NREADERS + i]);
+        sleeptime = timeadd(sleeptime, sleeptimes[NREADERS + i]);
         wruns += *(runs[NREADERS + i]);
     }
     printf("Write runs: %ju, write runtimes: %jus, %juns "
@@ -182,6 +196,10 @@ main(int argc, char **argv)
            (uintmax_t)runtime.tv_nsec / NWRITERS,
            (uintmax_t)sleeptime.tv_sec / NWRITERS,
            (uintmax_t)sleeptime.tv_nsec / NWRITERS);
+    usperrun = (runtime.tv_sec * 1000000) / NWRITERS +
+               (runtime.tv_nsec / 1000) / NWRITERS;
+    usperrun /= wruns;
+    printf("Average write time: %fus\n", usperrun);
 
     printf("\n\n");
 
@@ -258,9 +276,8 @@ reader(void *data)
     sleeptimes[thread_num].tv_sec = (us * rruns) / 1000000;
     sleeptimes[thread_num].tv_nsec = ((us * rruns) % 1000000) * 1000;
 
-    timesub(&endtimes[thread_num],
-            &starttimes[thread_num],
-            &runtimes[thread_num]);
+    runtimes[thread_num] = timesub(endtimes[thread_num],
+                                   starttimes[thread_num]);
     assert(runtimes[thread_num].tv_sec != 0);
 
     runtimes[thread_num].tv_sec -= (us * rruns) / 1000000;
@@ -323,9 +340,8 @@ writer(void *data)
     sleeptimes[thread_num].tv_sec = (us * wruns) / 1000000;
     sleeptimes[thread_num].tv_nsec = ((us * wruns) % 1000000) * 1000;
 
-    timesub(&endtimes[thread_num],
-            &starttimes[thread_num],
-            &runtimes[thread_num]);
+    runtimes[thread_num] = timesub(endtimes[thread_num],
+                                   starttimes[thread_num]);
     assert(runtimes[thread_num].tv_sec != 0);
 
     runtimes[thread_num].tv_sec -= (us * wruns) / 1000000;
