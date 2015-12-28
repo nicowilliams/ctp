@@ -631,6 +631,10 @@ pthread_var_set_np(pthread_var_np_t vp, void *cfdata,
 #error "wat"
 #endif
 
+/*
+ * Lock-less utility that scans through logical slot array looking for a
+ * free slot to reuse.
+ */
 static struct slot *
 get_free_slot(pthread_var_np_t vp)
 {
@@ -651,6 +655,7 @@ get_free_slot(pthread_var_np_t vp)
     return NULL;
 }
 
+/* Lock-less utility to get nth slot */
 static struct slot *
 get_slot(pthread_var_np_t vp, uint32_t slot_idx)
 {
@@ -672,6 +677,7 @@ get_slot(pthread_var_np_t vp, uint32_t slot_idx)
     return &slots->slot_array[slot_idx - slots->slot_base];
 }
 
+/* Lock-less utility to grow the logical slot array */
 static int
 grow_slots(pthread_var_np_t vp, uint32_t slot_idx, int tries)
 {
@@ -692,7 +698,7 @@ grow_slots(pthread_var_np_t vp, uint32_t slot_idx, int tries)
         return 0;
 
     if (tries < 1)
-        return EAGAIN;
+        return EAGAIN; /* shouldn't happen; XXX assert? */
 
     if ((new_slots = calloc(1, sizeof(*new_slots))) == NULL)
         return errno;
@@ -718,20 +724,24 @@ grow_slots(pthread_var_np_t vp, uint32_t slot_idx, int tries)
     atomic_write_32(&new_slots->slot_array[slot_idx - nslots].in_use, 1);
 
     if (atomic_cas_ptr((volatile void **)slotsp, NULL, new_slots) != NULL) {
+        /*
+         * We lost the race to grow the array.  The index we wanted is
+         * not guaranteed to be covered by the grown array.  We fall
+         * through to recurse to repeat.
+         */
         free(new_slots->slot_array);
         free(new_slots);
-        return 0;
     }
 
-    /* We lost a race to grow the array */
-
     /*
-     * Tail recurse to repeat.  Note that the CAS above has made the
-     * current subscription slot state visible to the repetition.
+     * We won the race to grow the array.  The index we wanted is
+     * guaranteed to be present.  We recurse anyways just in case (it's
+     * fast) and because we fell through if we lost the race.
      */
     return grow_slots(vp, slot_idx, tries - 1);
 }
 
+/* Utility to destroy a thread-safe global variable */
 static void
 destroy_var(pthread_var_np_t vp)
 {
@@ -765,6 +775,7 @@ destroy_var(pthread_var_np_t vp)
     /* XXX We leak var->tkey! */
 }
 
+/* Thread specific key destructor for handling thread exit */
 void
 release_slot(void *data)
 {
@@ -778,6 +789,11 @@ release_slot(void *data)
 
     /* Release slot */
     atomic_write_32(&slot->in_use, 0);
+
+    /*
+     * If the thread-safe global was destroyed while we held the last
+     * slot then it falls to us to complete the destruction.
+     */
     if (atomic_dec_32_nv(&slot->vp->slots_in_use) == 0)
         destroy_var(slot->vp);
 }
@@ -812,7 +828,7 @@ pthread_var_init_np(pthread_var_np_t *vpp,
     vp->values = NULL;
     vp->slots = NULL;
     vp->dtor = dtor;
-    vp->slots_in_use = 1;
+    vp->slots_in_use = 1; /* decremented upon destruction */
 
     if ((err = pthread_key_create(&vp->tkey, release_slot)) != 0) {
         memset(vp, 0, sizeof(*vp));
@@ -859,8 +875,8 @@ pthread_var_destroy_np(pthread_var_np_t vp)
     if (vp == 0)
         return;
     if (atomic_dec_32_nv(&vp->slots_in_use) > 0)
-        return;
-    destroy_var(vp);
+        return;     /* defer to last reader slot release via thread key dtor */
+    destroy_var(vp);/* we're the last, destroy now */
 }
 
 /**
@@ -888,22 +904,16 @@ pthread_var_get_np(pthread_var_np_t vp, void **res, uint64_t *version)
     *res = NULL;
 
     if ((slot = pthread_getspecific(vp->tkey)) == NULL) {
-        /* First time for this thread -> slow path (subscribe thread) */
-        while ((slot = get_free_slot(vp)) == NULL) {
+        /* First time for this thread -> O(N) slow path (subscribe thread) */
+        slot = get_free_slot(vp);
+        if ((slot = get_free_slot(vp)) == NULL) {
             /* Slower path still: grow slots array list */
             slot_idx = atomic_inc_32_nv(&vp->next_slot_idx) - 1;
-            err = grow_slots(vp, slot_idx, 2);
+            err = grow_slots(vp, slot_idx, 2);  /* O(log N) */
             assert(err == 0);
-            slot = get_slot(vp, slot_idx);
+            slot = get_slot(vp, slot_idx);      /* O(N) */
             assert(slot != NULL);
-
-            /* We might have lost a race */
-            if (atomic_cas_32(&slot->in_use, 0, 1) == 0) {
-                /* Won it */
-                slot->value = NULL;
-                break;
-            }
-            /* Lost it; repeat */
+            atomic_write_32(&slot->in_use, 1);
         }
         assert(slot->vp == vp);
         slots_in_use = atomic_inc_32_nv(&vp->slots_in_use);
@@ -912,7 +922,10 @@ pthread_var_get_np(pthread_var_np_t vp, void **res, uint64_t *version)
             return err;
     }
 
-    /* Else/Then fast path with one acquire read and one release write */
+    /*
+     * Else/then fast path: one acquire read, one release write, no
+     * free()s.  O(1).
+     */
     if (slot->value != (newest = atomic_read_ptr((volatile void **)&vp->values)))
         atomic_write_ptr((volatile void **)&slot->value, newest);
 
@@ -931,9 +944,11 @@ pthread_var_get_np(pthread_var_np_t vp, void **res, uint64_t *version)
  * @param vp [in] A thread-safe global variable
  */
 void
-pthread_var_release_np(pthread_var_np_t vp) {
+pthread_var_release_np(pthread_var_np_t vp)
+{
     struct slot *slot;
 
+    /* Always fast; never free()s.  O(1) */
     if ((slot = pthread_getspecific(vp->tkey)) == NULL)
         return;
     atomic_write_ptr((volatile void **)&slot->value, NULL);
@@ -954,6 +969,7 @@ pthread_var_set_np(pthread_var_np_t vp, void *data,
                      uint64_t *new_version)
 {
     struct value *new_value;
+    struct value *old_values = NULL;
     struct value *value;
     struct value **p; /* Pointer to list/sub-list head */
     struct slots *slots;
@@ -965,17 +981,20 @@ pthread_var_set_np(pthread_var_np_t vp, void *data,
 
     if (new_version == NULL)
         new_version = &vers;
-
     *new_version = 0;
 
     if ((new_value = calloc(1, sizeof(*new_value))) == NULL)
         return errno;
 
-
     if ((err = pthread_mutex_lock(&vp->write_lock)) != 0) {
         free(new_value);
         return err;
     }
+
+    /*
+     * No allocations/free()s done with write lock held -> higher write
+     * throughput.
+     */
 
     new_value->value = data;
     new_value->next = vp->values;
@@ -989,9 +1008,9 @@ pthread_var_set_np(pthread_var_np_t vp, void *data,
     /* Publish the new value */
     atomic_write_ptr((volatile void **)&vp->values, new_value);
 
-    /* Now comes the slow part: garbage collect vp->values */
+    /* Now comes the slow part: garbage collect vp->values.  O(N). */
 
-    /* Mark */
+    /* Mark; O(N) where N is the number of subscribed threads */
     vp->values->referenced = 1; /* curr value is always in use */
     max_slot = atomic_read_32(&vp->next_slot_idx);
     for (i = 0, slots = vp->slots; i < max_slot; i++) {
@@ -1010,7 +1029,7 @@ pthread_var_set_np(pthread_var_np_t vp, void *data,
      * value, thus we don't need to consider them.
      */
 
-    /* Sweep */
+    /* Sweep; O(N) where N is the number of referenced values */
     for (p = &vp->values; *p != NULL;) {
         value = *p;
 
@@ -1018,8 +1037,8 @@ pthread_var_set_np(pthread_var_np_t vp, void *data,
             /* Remove from list */
             assert(value != new_value);
             *p = value->next;
-            vp->dtor(value->value);
-            free(value);
+            value->next = old_values;
+            old_values = value;
 
             /* Sweep new [sub-]list */
             continue;
@@ -1040,8 +1059,15 @@ pthread_var_set_np(pthread_var_np_t vp, void *data,
         (void) pthread_mutex_unlock(&vp->waiter_lock);
     }
 
-    pthread_mutex_unlock(&vp->write_lock);
-    return 0;
+    err = pthread_mutex_unlock(&vp->write_lock);
+
+    /* Free old values now with no locks held */
+    for (value = old_values; value != NULL; value = old_values) {
+        vp->dtor(value->value);
+        old_values = value->next;
+        free(value);
+    }
+    return err;
 }
 
 #endif /* USE_TSGV_SLOT_PAIR_DESIGN */
