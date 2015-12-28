@@ -1,4 +1,7 @@
 
+#define _POSIX_C_SOURCE 200809L
+#define _BSD_SOURCE 600
+
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <assert.h>
