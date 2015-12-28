@@ -257,7 +257,6 @@ pthread_var_destroy_np(pthread_var_np_t vp)
     pthread_mutex_destroy(&vp->cv_lock);
     wrapper_free(vp->vars[0].wrapper);
     wrapper_free(vp->vars[1].wrapper);
-    memset(vp, 0, sizeof(*vp));
     vp->vars[0].other = &vp->vars[1];
     vp->vars[1].other = &vp->vars[0];
     vp->vars[0].wrapper = NULL;
@@ -295,8 +294,6 @@ pthread_var_get_np(pthread_var_np_t vp, void **res, uint64_t *version)
 {
     int err = 0;
     int err2 = 0;
-    int err3 = 0;
-    size_t i;
     uint32_t nref;
     struct var *v;
     uint64_t vers, vers2;
