@@ -33,6 +33,8 @@ timeadd(struct timespec a, struct timespec b)
 {
     struct timespec r;
 
+    assert(a.tv_nsec >= 0 && a.tv_nsec < 1000000000);
+    assert(b.tv_nsec >= 0 && b.tv_nsec < 1000000000);
     a.tv_nsec %= 1000000000;
     b.tv_nsec %= 1000000000;
     r.tv_sec = a.tv_sec + b.tv_sec;
@@ -41,6 +43,7 @@ timeadd(struct timespec a, struct timespec b)
         r.tv_sec++;
         r.tv_nsec -= 1000000000;
     }
+    assert(r.tv_nsec >= 0 && r.tv_nsec < 1000000000);
     return r;
 }
 
@@ -49,14 +52,17 @@ timesub(struct timespec a, struct timespec b)
 {
     struct timespec r;
 
+    assert(a.tv_nsec >= 0 && a.tv_nsec < 1000000000);
+    assert(b.tv_nsec >= 0 && b.tv_nsec < 1000000000);
     a.tv_nsec %= 1000000000;
     b.tv_nsec %= 1000000000;
     r.tv_sec = a.tv_sec - b.tv_sec;
     r.tv_nsec = a.tv_nsec - b.tv_nsec;
-    if (r.tv_nsec < 1000000000) {
+    if (r.tv_nsec < 0) {
         r.tv_sec--;
         r.tv_nsec += 1000000000;
     }
+    assert(r.tv_nsec >= 0 && r.tv_nsec < 1000000000);
     return r;
 }
 
@@ -179,6 +185,7 @@ main(int argc, char **argv)
                (runtime.tv_nsec / 1000) / NREADERS;
     usperrun /= rruns;
     printf("Average read time: %fus\n", usperrun);
+    printf("Reads/s: %f/s\n", ((double)1000000.0)/usperrun);
 
     runtime.tv_sec = 0;
     runtime.tv_nsec = 0;
@@ -200,6 +207,7 @@ main(int argc, char **argv)
                (runtime.tv_nsec / 1000) / NWRITERS;
     usperrun /= wruns;
     printf("Average write time: %fus\n", usperrun);
+    printf("Writes/s: %f/s\n", ((double)1000000.0)/usperrun);
 
     printf("\n\n");
 
@@ -278,10 +286,9 @@ reader(void *data)
 
     runtimes[thread_num] = timesub(endtimes[thread_num],
                                    starttimes[thread_num]);
-    assert(runtimes[thread_num].tv_sec != 0);
 
-    runtimes[thread_num].tv_sec -= (us * rruns) / 1000000;
-    runtimes[thread_num].tv_nsec -= ((us * rruns) % 1000000) * 1000;
+    runtimes[thread_num] = timesub(runtimes[thread_num],
+                                   sleeptimes[thread_num]);
 
     return NULL;
 }
@@ -342,10 +349,9 @@ writer(void *data)
 
     runtimes[thread_num] = timesub(endtimes[thread_num],
                                    starttimes[thread_num]);
-    assert(runtimes[thread_num].tv_sec != 0);
 
-    runtimes[thread_num].tv_sec -= (us * wruns) / 1000000;
-    runtimes[thread_num].tv_nsec -= ((us * wruns) % 1000000) * 1000;
+    runtimes[thread_num] = timesub(runtimes[thread_num],
+                                   sleeptimes[thread_num]);
 
     /*atomic_dec_32_nv(&nthreads);*/
     printf("\nWriter (%jd) exiting; threads left: %u\n", (intmax_t)thread_num, atomic_dec_32_nv(&nthreads));
