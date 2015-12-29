@@ -102,6 +102,7 @@ main(int argc, char **argv)
     size_t i, k;
     int urandom_fd;
     uint64_t *magic_exit;
+    uint64_t last_version;
     uint64_t version;
     struct timespec starttime;
     struct timespec endtime;
@@ -151,7 +152,7 @@ main(int argc, char **argv)
         if ((errno = pthread_cond_wait(&exit_cv, &exit_cv_lock)) != 0)
             err(1, "pthread_cond_wait(&exit_cv, &exit_cv_lock) failed");
         if (nthreads == NREADERS) {
-            if ((errno = pthread_var_set_np(var, magic_exit, &version)) != 0)
+            if ((errno = pthread_var_set_np(var, magic_exit, &last_version)) != 0)
                 err(1, "pthread_var_set_np failed");
             printf("\nTold readers to exit.\n");
         }
@@ -161,6 +162,34 @@ main(int argc, char **argv)
         err(1, "clock_gettime(CLOCK_MONOTONIC) failed");
 
     runtime = timesub(endtime, starttime);
+
+    {
+        /* Time reads that of really idle vars */
+        void *p;
+        struct timespec idle_start;
+        struct timespec idle_end;
+        struct timespec idle_run;
+
+#define IDLE_READ_RUNS 50000
+
+        if ((errno = pthread_var_get_np(var, &p, &version)) != 0)
+            err(1, "pthread_var_get_np(var) failed");
+        assert(version == last_version);
+        if (clock_gettime(CLOCK_MONOTONIC, &idle_start) != 0)
+            err(1, "clock_gettime(CLOCK_MONOTONIC) failed");
+        for (i = 0; i < IDLE_READ_RUNS; i++) {
+            if ((errno = pthread_var_get_np(var, &p, &version)) != 0)
+                err(1, "pthread_var_get_np(var) failed");
+            assert(version == last_version);
+        }
+        if (clock_gettime(CLOCK_MONOTONIC, &idle_end) != 0)
+            err(1, "clock_gettime(CLOCK_MONOTONIC) failed");
+        idle_run = timesub(idle_end, idle_start);
+        usperrun = idle_run.tv_sec * 1000000 + idle_run.tv_nsec / 1000;
+        usperrun /= IDLE_READ_RUNS;
+        printf("Reads on idle var: %fus/read, %f reads/s\n",
+               usperrun, ((double)1000000.0)/usperrun);
+    }
 
     (void) pthread_mutex_unlock(&exit_cv_lock);
     pthread_var_destroy_np(var);
