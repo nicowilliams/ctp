@@ -284,22 +284,14 @@ pthread_var_get_np(pthread_var_np_t vp, void **res, uint64_t *version)
 
     *res = NULL;
 
-#ifndef NO_FAST_PATH
-    /*
-     * This is #ifndef'ed to make it possible to test without the fast
-     * path: it might make it easier to trip race conditions that might
-     * not be handled below.
-     */
-    {
-        wrapper = pthread_getspecific(vp->tkey);
-        if (wrapper != NULL &&
-            wrapper->version == 1 + atomic_cas_64(&vp->next_version, 0, 0)) {
-            *version = 1 + wrapper->version;
-            *res = wrapper->ptr;
-            return 0;
-        }
+    if ((wrapper = pthread_getspecific(vp->tkey)) != NULL &&
+        wrapper->version == atomic_read_64(&vp->next_version) - 1) {
+
+        /* Fast path */
+        *version = wrapper->version;
+        *res = wrapper->ptr;
+        return 0;
     }
-#endif
 
     /* Get the current next version */
     *version = atomic_cas_64(&vp->next_version, 0, 0);
