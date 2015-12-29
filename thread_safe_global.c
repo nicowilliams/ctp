@@ -90,17 +90,6 @@
  *            modified with an atomic operation.  This is to ensure
  *            memory visibility rules (see above), though we may be
  *            trying much too hard in some cases.
- *
- *            We could probably make this code more efficient using
- *            explicit acquire/release membars and fewer CASes, on some
- *            CPUs anyways.  But this should already be quite a lot
- *            faster for readers than using read-write locks, and a much
- *            more convenient and natural API to boot.
- *
- *            In any case: first make it work, then optimize.
- *
- * FWIW, there are 10 atomic_cas_{32,64,ptr}() calls which can be
- * replaced with atomic_read_{32,64,ptr}().
  */
 
 static void
@@ -294,7 +283,7 @@ pthread_var_get_np(pthread_var_np_t vp, void **res, uint64_t *version)
     }
 
     /* Get the current next version */
-    *version = atomic_cas_64(&vp->next_version, 0, 0);
+    *version = atomic_read_64(&vp->next_version);
     if (*version == 0) {
         /* Not set yet */
         assert(*version == 0 || *res != NULL);
@@ -318,7 +307,7 @@ pthread_var_get_np(pthread_var_np_t vp, void **res, uint64_t *version)
     (void) atomic_inc_32_nv(&v->nreaders);
 
     /* See if we won any race */
-    if ((vers2 = atomic_cas_64(&vp->next_version, 0, 0)) == *version) {
+    if ((vers2 = atomic_read_64(&vp->next_version)) == *version) {
         /*
          * We won, or didn't race at all.  We can now safely
          * increment nref for the wrapped value in the current slot.
@@ -367,7 +356,7 @@ pthread_var_get_np(pthread_var_np_t vp, void **res, uint64_t *version)
      * guaranteed to have one usable slot (whichever one we _now_ see as
      * the current slot, and which can still become the previous slot).
      */
-    vers2 = atomic_cas_64(&vp->next_version, 0, 0);
+    vers2 = atomic_read_64(&vp->next_version);
     assert(vers2 > *version);
     *version = vers2 - 1;
 
@@ -388,14 +377,14 @@ got_a_slot:
         return (err2 == 0) ? err : err2;
     }
 
-    assert(vers2 == atomic_cas_64(&vp->next_version, 0, 0) ||
-           (vers2 + 1) == atomic_cas_64(&vp->next_version, 0, 0));
+    assert(vers2 == atomic_read_64(&vp->next_version) ||
+           (vers2 + 1) == atomic_read_64(&vp->next_version));
 
     /* Take the wrapped value for the slot we chose */
     nref = atomic_inc_32_nv(&v->wrapper->nref);
     assert(nref > 1);
     *version = v->wrapper->version;
-    *res = atomic_cas_ptr((volatile void **)&v->wrapper->ptr, NULL, NULL);
+    *res = atomic_read_ptr((volatile void **)&v->wrapper->ptr);
     assert(*res != NULL);
 
     /*
@@ -505,11 +494,11 @@ pthread_var_set_np(pthread_var_np_t vp, void *cfdata,
     }
 
     /* vp->next_version is stable because we hold the write_lock */
-    *new_version = wrapper->version = atomic_cas_64(&vp->next_version, 0, 0);
+    *new_version = wrapper->version = atomic_read_64(&vp->next_version);
 
     /* Grab the next slot */
     v = vp->vars[(*new_version + 1) & 0x1].other;
-    old_wrapper = atomic_cas_ptr((volatile void **)&v->wrapper, NULL, NULL);
+    old_wrapper = atomic_read_ptr((volatile void **)&v->wrapper);
 
     if (*new_version == 0) {
         /* This is the first write; set wrapper on both slots */
@@ -546,7 +535,7 @@ pthread_var_set_np(pthread_var_np_t vp, void *cfdata,
         free(wrapper);
         return err;
     }
-    while (atomic_cas_32(&v->nreaders, 0, 0) > 0) {
+    while (atomic_read_32(&v->nreaders) > 0) {
         /*
          * We have a separate lock for writing vs. waiting so that no
          * other writer can steal our march.  All writers will enter,
