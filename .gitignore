@@ -1,0 +1,12 @@
+
+*.o
+*.so.*
+*.gcda
+*.gcno
+*.gcov
+*~
+.*.sw[a-p]
+
+cscope.in.out
+cscope.out
+cscope.po.out
