@@ -70,6 +70,7 @@ timesub(struct timespec a, struct timespec b)
 }
 
 static void *reader(void *data);
+static void *idle_reader(void *);
 static void *writer(void *data);
 static void dtor(void *);
 
@@ -82,11 +83,15 @@ static pthread_mutex_t exit_cv_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t exit_cv = PTHREAD_COND_INITIALIZER;
 static uint32_t nthreads = MY_NTHREADS;
 static uint32_t random_bytes[MY_NTHREADS];
+static uint32_t idleruns[MY_NTHREADS];
 static uint64_t *runs[MY_NTHREADS];
 static struct timespec starttimes[MY_NTHREADS];
 static struct timespec endtimes[MY_NTHREADS];
 static struct timespec runtimes[MY_NTHREADS];
 static struct timespec sleeptimes[MY_NTHREADS];
+static struct timespec idlestarttimes[MY_NTHREADS];
+static struct timespec idleendtimes[MY_NTHREADS];
+static struct timespec idleruntimes[MY_NTHREADS];
 
 enum magic {
     MAGIC_FREED = 0xABADCAFEEFACDABAUL,
@@ -108,7 +113,7 @@ main(int argc, char **argv)
     struct timespec endtime;
     struct timespec runtime;
     struct timespec sleeptime;
-    uint64_t rruns = 0;
+    uint64_t rruns;
     uint64_t wruns = 0;
     double usperrun;
 
@@ -164,7 +169,6 @@ main(int argc, char **argv)
     runtime = timesub(endtime, starttime);
 
     {
-        /* Time reads that of really idle vars */
         void *p;
         struct timespec idle_start;
         struct timespec idle_end;
@@ -172,6 +176,7 @@ main(int argc, char **argv)
 
 #define IDLE_READ_RUNS 50000
 
+        /* Measure single-threaded read performance on an idle var */
         if ((errno = pthread_var_get_np(var, &p, &version)) != 0)
             err(1, "pthread_var_get_np(var) failed");
         assert(version == last_version);
@@ -189,6 +194,65 @@ main(int argc, char **argv)
         usperrun /= IDLE_READ_RUNS;
         printf("Reads on idle var: %fus/read, %f reads/s\n",
                usperrun, ((double)1000000.0)/usperrun);
+
+#define THREADED_IDLE_READ_RUNS 50000
+
+        /* Test threaded idle reader performance */
+        atomic_cas_32(&nthreads, 0, NREADERS);
+        for (i = 0; i < NREADERS; i++) {
+            idleruns[i] = THREADED_IDLE_READ_RUNS;
+            if ((errno = pthread_create(&readers[i], NULL, idle_reader,
+                                        idleruns)) != 0)
+                err(1, "Failed to create reader thread no. %ju", (uintmax_t)i);
+            if ((errno = pthread_detach(readers[i])) != 0)
+                err(1, "Failed to detach reader thread no. %ju", (uintmax_t)i);
+        }
+
+        while (atomic_cas_32(&nthreads, 0, 0) > 0) {
+            if ((errno = pthread_cond_wait(&exit_cv, &exit_cv_lock)) != 0)
+                err(1, "pthread_cond_wait(&exit_cv, &exit_cv_lock) failed");
+            if (nthreads == NREADERS) {
+                if ((errno = pthread_var_set_np(var, magic_exit, &last_version)) != 0)
+                    err(1, "pthread_var_set_np failed");
+                printf("\nTold readers to exit.\n");
+            }
+        }
+
+        rruns = 0;
+        runtime.tv_sec = 0;
+        runtime.tv_nsec = 0;
+        for (i = 0; i < NREADERS; i++) {
+            runtime = timeadd(runtime, idleruntimes[i]);
+            rruns += idleruns[i];
+        }
+        printf("Threaded idle read runs: %ju, read runtimes: %jus, %juns\n",
+               (uintmax_t)rruns,
+               (uintmax_t)runtime.tv_sec / NREADERS,
+               (uintmax_t)runtime.tv_nsec / NREADERS);
+        usperrun = (runtime.tv_sec * 1000000) / NREADERS +
+                   (runtime.tv_nsec / 1000) / NREADERS;
+        usperrun /= rruns;
+        printf("Average threaded idle read time: %fus\n", usperrun);
+        printf("Threaded idle reads/s: %f/s\n", ((double)1000000.0)/usperrun);
+
+#define IDLE_WRITE_RUNS 5000
+
+        /* Measure single-threaded write performance on an idle var */
+        if (clock_gettime(CLOCK_MONOTONIC, &idle_start) != 0)
+            err(1, "clock_gettime(CLOCK_MONOTONIC) failed");
+        for (i = 0; i < IDLE_READ_RUNS; i++) {
+            if ((errno = pthread_var_set_np(var, (void *)0x08UL, &version)) != 0)
+                err(1, "pthread_var_set_np(var) failed");
+            assert(version == last_version + 1);
+            last_version = version;
+        }
+        if (clock_gettime(CLOCK_MONOTONIC, &idle_end) != 0)
+            err(1, "clock_gettime(CLOCK_MONOTONIC) failed");
+        idle_run = timesub(idle_end, idle_start);
+        usperrun = idle_run.tv_sec * 1000000 + idle_run.tv_nsec / 1000;
+        usperrun /= IDLE_READ_RUNS;
+        printf("Writes on idle var: %fus/write, %f writes/s\n",
+               usperrun, ((double)1000000.0)/usperrun);
     }
 
     (void) pthread_mutex_unlock(&exit_cv_lock);
@@ -197,6 +261,7 @@ main(int argc, char **argv)
     printf("Run time: %jus, %juns\n", (uintmax_t)runtime.tv_sec,
            (uintmax_t)runtime.tv_nsec);
 
+    rruns = 0;
     runtime.tv_sec = 0;
     runtime.tv_nsec = 0;
     sleeptime.tv_sec = 0;
@@ -286,16 +351,8 @@ reader(void *data)
             err(1, "version went backwards for this reader!");
         last_version = version;
         assert(version == 0 || p != 0);
-        if (*(uint64_t *)p == MAGIC_EXIT) {
-            atomic_dec_32_nv(&nthreads);
-            if ((errno = pthread_mutex_lock(&exit_cv_lock)) != 0)
-                err(1, "Failed to acquire exit lock");
-            if ((errno = pthread_cond_signal(&exit_cv)) != 0)
-                err(1, "Failed to signal exit cv");
-            if ((errno = pthread_mutex_unlock(&exit_cv_lock)) != 0)
-                err(1, "Failed to release exit lock");
+        if (*(uint64_t *)p == MAGIC_EXIT)
             break;
-        }
         assert(*(uint64_t *)p != MAGIC_FREED);
         assert(*(uint64_t *)p == MAGIC_INITED);
         if (*(uint64_t *)p == MAGIC_FREED)
@@ -321,6 +378,48 @@ reader(void *data)
 
     runtimes[thread_num] = timesub(runtimes[thread_num],
                                    sleeptimes[thread_num]);
+
+    atomic_dec_32_nv(&nthreads);
+    if ((errno = pthread_mutex_lock(&exit_cv_lock)) != 0)
+        err(1, "Failed to acquire exit lock");
+    if ((errno = pthread_cond_signal(&exit_cv)) != 0)
+        err(1, "Failed to signal exit cv");
+    if ((errno = pthread_mutex_unlock(&exit_cv_lock)) != 0)
+        err(1, "Failed to release exit lock");
+
+    return NULL;
+}
+
+static void *
+idle_reader(void *data)
+{
+    int thread_num = (uint32_t *)data - idleruns;
+    uint64_t version;
+    uint64_t last_version = 0;
+    uint64_t i;
+    void *p;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &idlestarttimes[thread_num]) != 0)
+        err(1, "clock_gettime(CLOCK_MONOTONIC) failed");
+
+    for (i = idleruns[thread_num]; i > 0; i--) {
+        if ((errno = pthread_var_get_np(var, &p, &version)) != 0)
+            err(1, "pthread_var_get_np(var) failed");
+    }
+
+    if (clock_gettime(CLOCK_MONOTONIC, &idleendtimes[thread_num]) != 0)
+        err(1, "clock_gettime(CLOCK_MONOTONIC) failed");
+
+    idleruntimes[thread_num] = timesub(idleendtimes[thread_num],
+                                       idlestarttimes[thread_num]);
+
+    atomic_dec_32_nv(&nthreads);
+    if ((errno = pthread_mutex_lock(&exit_cv_lock)) != 0)
+        err(1, "Failed to acquire exit lock");
+    if ((errno = pthread_cond_signal(&exit_cv)) != 0)
+        err(1, "Failed to signal exit cv");
+    if ((errno = pthread_mutex_unlock(&exit_cv_lock)) != 0)
+        err(1, "Failed to release exit lock");
 
     return NULL;
 }
@@ -399,6 +498,8 @@ writer(void *data)
 static void
 dtor(void *data)
 {
+    if (data == (void *)0x08UL)
+        return;
     *(uint64_t *)data = MAGIC_FREED;
     free(data);
 }
