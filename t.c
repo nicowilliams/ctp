@@ -19,16 +19,17 @@
 
 /*
  * TODO:
- *  - Gather and print performance numbers
  *
- *    In particular:
+ *  - Make most of main() into a utility function that takes a number of
+ *    readers and a number of writers, and min/max sleep time for each
+ *  - Make thread main functions take a pointer to a configuration
+ *    struct instead of using globals all over
+ *  - Make main() parse program arguments allowing the user to specify
+ *    how many readers, how many writers, min/max sleep time for each
  *
- *     - start time
- *     - end time
- *     - number of reads done
- *     - number of reads / unit of time
- *     - estimated time spent sleeping vs. running for each writer
- *     - estimated time per write
+ *    The idea is to allow the user to match the test to NCPUs to avoid
+ *    context switching.  Perhaps there should be an option to use NCPU
+ *    threads total and to bind each thread to a different CPU.
  */
 
 struct timespec
