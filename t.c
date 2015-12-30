@@ -331,7 +331,7 @@ reader(void *data)
         us = 2000 + us % 2000;
     if (thread_num == 0 || thread_num == 1 || thread_num == 2)
         us = 0;
-    if (thread_num == 19)
+    if (thread_num == NREADERS - 1)
         us = 500000;
 
     printf("Reader (%jd) will sleep %uus between runs\n", (intmax_t)thread_num, us);
@@ -444,7 +444,7 @@ writer(void *data)
     if (i > 5000)
         i = 4999;
 
-    if (thread_num == NREADERS + 3) {
+    if (thread_num - NREADERS == NWRITERS - 1) {
         us %= 500;
         i *=10;
     }
