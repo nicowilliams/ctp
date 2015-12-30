@@ -60,6 +60,25 @@ laptop, running under virtualization.
 A test program is included that hammers the implementation.  Run it in a
 loop, with and without valgrind.
 
+Performance
+-----------
+
+On an old i7 laptop, virtualized, reads on idle thread-safe global
+variables (i.e., no writers in sight) take about 15ns.  This is because
+the fast path in both implementations consists of reading a thread-local
+variable and then performing a single acquire-fenced memory read.
+
+On that same system, when threads write very frequently then reads slow
+down to about 8us (8000ns).  (But the test had eight times more threads
+than CPUs, so the cost of context switching is included in that number.)
+
+On that same system writes on a busy thread-safe global variable take
+about 50us (50000ns), but non-contending writes on an otherwise idle
+thread-safe global variable take about 180ns.
+
+I.e., this is blindingly fast, especially for intended use case
+(infrequent writes).
+
 Install
 -------
 
