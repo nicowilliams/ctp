@@ -63,15 +63,33 @@ loop, with and without valgrind.
 Install
 -------
 
-Right now there's no Makefile, sorry, but it's trivial to build it:
+Clone this repo, select a configuration, and make it.
 
-    $ cc -Wall -Wextra -ggdb3 -DHAVE___ATOMIC -c *.c && cc -o t *.o -lpthread
+For example, to build the slot-pair implementation, use:
 
-or
+    $ make clean slotpair
 
-    $ cc -Wall -Wextra -ggdb3 -DUSE_URCU_SUBSCRIPTION_SLOTS_DESIGN -DHAVE___ATOMIC -c *.c && cc -o t *.o -lpthread
+To build the slot-list implementation, use:
 
-An build configuration system is needed, in part to select an atomic primitive backend.
+    $ make clean slotlist
+
+A GNU-like make(1) is needed.
+
+Configuration variables:
+
+ - `COPTFLAG`
+ - `CDBGFLAG`
+ -`CC`
+ - `ATOMICS_BACKEND`
+
+   Values: `-DHAVE___ATOMIC`, `-DHAVE___SYNC`, `-DHAVE_INTEL_INTRINSICS`, `-DHAVE_PTHREAD`, `-DNO_THREADS`
+
+ - `TSGV_IMPLEMENTATION`
+
+   Values: `-DUSE_TSGV_SLOT_PAIR_DESIGN`, `-DUSE_TSGV_SUBSCRIPTION_SLOTS_DESIGN`
+
+A build configuration system is needed, in part to select an atomic
+primitive backend.
 
 Several atomic primitives implementations are available:
 
@@ -87,3 +105,6 @@ TODO
  - Add an implementation using read-write locks to compare performance with
  - Use symbol names that don't conflict with pthread
  - Rename atomic utilities to not conflict with known atomics libraries
+ - Add a build system
+ - Support Win32 (perhaps by building a small pthread compatibility
+   library, only mutexes and condition variables are needed)
