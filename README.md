@@ -2,11 +2,18 @@ What is it?  A "thread-safe global variable" for C
 --------------------------------------------------
 
 A thread-safe global variable lets readers keep using a value read from
-it until they read the next value.  Values are automatically destroyed
-when the last reference is released or the last referring thread exits.
-This is not unlike a Clojure "ref".  Reads are always fast and don't
-block writes; conversely writes are serialized but otherwise fast and
+it until they read the next value.  Memory management is automatic:
+values are automatically destroyed when the last reference is released
+or the last referring thread exits.  Reads are always fast and never
+block writes.  Writes are serialized but otherwise also always fast and
 never block reads.
+
+This is not unlike a Clojure "ref".  It's also similar to RCU, but
+unlike RCU, this has a much simpler API with nothing like
+`synchronize_rcu()`, and doesn't require any cross-CPU calls nor the
+ability to make CPUs/threads run, and it has no application-visible
+concept of critical sections, therefore it works in user-land with no
+special kernel support.
 
     typedef struct pthread_var_np *pthread_var_np_t;
     typedef void (*pthread_var_destructor_np_t)(void *);
@@ -16,6 +23,12 @@ never block reads.
     int  pthread_var_set_np(pthread_var_np_t var, void *value, uint64_t *versionp);
     int  pthread_var_wait_np(pthread_var_np_t var);
     void pthread_var_release_np(pthread_var_np_t var);
+
+Most threads only ever need to call `pthread_var_get_np()`, and maybe
+once `pthread_var_wait_np()`; some may need to call
+`pthread_var_set_np()`.  One thread needs to create the variable, with
+`pthread_var_init_np()`.  Readers may, but do not have to, call
+`pthread_var_release_np()`.
 
 Why?  Because read-write locks are teh worst
 --------------------------------------------
@@ -40,25 +53,35 @@ How?
 Two implementations are included at this time.  Read the source to find
 out more.
 
-The two implementations have slightly different characteristics.  One
-has O(1) reads and writes, but readers call free() and, under certain
-circumstances, sometimes have to signal a potentially-waiting writer --
-a blocking operation, though on uncontended resources.  The other has
-O(1) reads, and O(N) writes (where N is the number of live threads that
-have read the variable), with readers never calling the allocator after
-the first read in any given thread, and writers never calling the
-allocator while holding a lock.
+The two implementations have slightly different characteristics.
 
-Both implementations perform equally well on the included test.  The
-test pits 20 reader threads waiting various small amounts of time
+ - One implementation ("slot pair") has O(1) reads and writes.
+
+   But readers call free() and the value destructor, and, sometimes have
+   to signal a potentially-waiting writer -- a blocking operation,
+   though on uncontended resources.
+
+ - The other implementation ("slot list") has O(1) reads, and O(N)
+   writes (where N is the maximum number of live threads that have read
+   the variable), with readers never calling the allocator after the
+   first read in any given thread, and writers never calling the
+   allocator while holding a lock.
+
+   But readers have to loop over their fast path, a loop that can run
+   indefinitely if there are higher-priority writers who starve the
+   reader of CPU time.
+
+A test program is included that hammers the implementation.  Run it in a
+loop, with and without valgrind, to look for racy bugs.
+
+Both implementations perform similarly well on the included test.
+
+The test pits 20 reader threads waiting various small amounts of time
 between reads (one not waiting at all), against 4 writer threads waiting
 various small amounts of time between writes.  This test found a variety
 of bugs during development.  In both cases writes are, on average, 5x
 slower than reads, and reads are in the ten microseconds range on an old
 laptop, running under virtualization.
-
-A test program is included that hammers the implementation.  Run it in a
-loop, with and without valgrind.
 
 Performance
 -----------
@@ -115,15 +138,19 @@ Several atomic primitives implementations are available:
  - gcc/clang `__atomic`
  - gcc/clang `__sync`
  - Win32 `Interlocked*()`
+ - Intel compiler intrinsics (`_Interlocked*()`)
  - global pthread mutex
  - no synchronization (watch the test blow up!)
 
 TODO
 ----
 
- - Add an implementation using read-write locks to compare performance with
+ - Add a proper build system
+ - Add an implementation using read-write locks to compare performance
+   with
  - Use symbol names that don't conflict with pthread
- - Rename atomic utilities to not conflict with known atomics libraries
- - Add a build system
+ - Use symbol names that don't conflict with known atomics libraries (so
+   those can be used as an atomics backend)
  - Support Win32 (perhaps by building a small pthread compatibility
-   library, only mutexes and condition variables are needed)
+   library; only mutexes and condition variables are needed)
+
