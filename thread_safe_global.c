@@ -372,6 +372,19 @@ got_a_slot:
             /* Last reader of a slot -> signal writer. */
             do_signal_writer = 1;
         }
+        /*
+         * XXX If vp->next_version hasn't changed since earlier then we
+         * should be able to avoid having to signal a writer when we
+         * decrement what we know is the current slot's nreaders to
+         * zero.  This should read:
+         *
+         * if ((atomic_dec_32_nv(&v->nreaders) == 0 &&
+         *      atomic_read_64(&vp->next_version) == vers2) ||
+         *     do_signal_writer)
+         *     err2 = signal_writer(vp);
+         *
+         * Thus allowing 
+         */
         if (atomic_dec_32_nv(&v->nreaders) == 0 || do_signal_writer)
             err2 = signal_writer(vp);
         return (err2 == 0) ? err : err2;
