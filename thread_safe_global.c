@@ -913,8 +913,18 @@ pthread_var_get_np(pthread_var_np_t vp, void **res, uint64_t *version)
     /*
      * Else/then fast path: one acquire read, one release write, no
      * free()s.  O(1).
+     *
+     * We have to loop because we could read one value in the
+     * conditional and that value could get freed if a writer runs
+     * between the read in the conditional and the assignment to
+     * slot->value with no other readers also succeeding in capturing
+     * that value before that writer completes.  This loop will run just
+     * once if there are no writers, and will run as many times as
+     * writers can run between the conditional and the body.  This loop
+     * can only be an infinite loop if there's an infinite number of
+     * writers who run with higher priority than this thread.
      */
-    if (slot->value != (newest = atomic_read_ptr((volatile void **)&vp->values)))
+    while (slot->value != (newest = atomic_read_ptr((volatile void **)&vp->values)))
         atomic_write_ptr((volatile void **)&slot->value, newest);
 
     if (slot->value != NULL) {
