@@ -1051,7 +1051,8 @@ pthread_var_set_np(pthread_var_np_t vp, void *data,
 
     /* Free old values now with no locks held */
     for (value = old_values; value != NULL; value = old_values) {
-        vp->dtor(value->value);
+        if (vp->dtor)
+            vp->dtor(value->value);
         old_values = value->next;
         free(value);
     }
