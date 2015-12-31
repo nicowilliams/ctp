@@ -396,7 +396,6 @@ idle_reader(void *data)
 {
     int thread_num = (uint32_t *)data - idleruns;
     uint64_t version;
-    uint64_t last_version = 0;
     uint64_t i;
     void *p;
 
