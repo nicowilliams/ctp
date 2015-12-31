@@ -624,16 +624,15 @@ pthread_var_set_np(pthread_var_np_t vp, void *cfdata,
 static struct slot *
 get_free_slot(pthread_var_np_t vp)
 {
-    struct slots *slots = atomic_read_ptr((volatile void **)&vp->slots);
+    struct slots *slots;
     struct slot *slot;
     size_t i;
 
-    for (; slots != NULL; slots = slots->next) {
+    for (slots = atomic_read_ptr((volatile void **)&vp->slots);
+         slots != NULL;
+         slots = atomic_read_ptr((volatile void **)&slots->next)) {
         for (i = 0; i < slots->slot_count; i++) {
             slot = &slots->slot_array[i];
-            /* This unprotected read of slot->in_use is an optimization */
-            if (slot->in_use)
-                continue;
             if (atomic_cas_32(&slot->in_use, 0, 1) == 0)
                 return slot;
         }
@@ -668,16 +667,15 @@ static int
 grow_slots(pthread_var_np_t vp, uint32_t slot_idx, int tries)
 {
     uint32_t nslots = 0;
-    uint32_t additions = 4;
+    uint32_t additions;
     uint32_t i;
+    int extra_tries = 0;
     struct slots **slotsp;
     struct slots *new_slots;
 
-    /*
-     * Here we do a number of non-atomic reads, but it's OK to race;
-     * we'll make it right below.
-     */
-    for (slotsp = &vp->slots; *slotsp != NULL; slotsp = &(*slotsp)->next)
+    for (slotsp = &vp->slots;
+         atomic_read_ptr(slotsp) != NULL;
+         slotsp = &((struct slots *)atomic_read_ptr(slotsp))->next)
         nslots += (*slotsp)->slot_count;
 
     if (nslots > slot_idx)
@@ -689,9 +687,13 @@ grow_slots(pthread_var_np_t vp, uint32_t slot_idx, int tries)
     if ((new_slots = calloc(1, sizeof(*new_slots))) == NULL)
         return errno;
 
-    while (nslots + additions < slot_idx)
+    additions = nslots == 0 ? 4 : nslots + nslots / 2;
+    while (nslots + additions < slot_idx) {
         additions *= 2;
+        extra_tries++;
+    }
     assert(slot_idx - nslots < additions);
+    tries += extra_tries / 2;
 
     new_slots->slot_array = calloc(additions, sizeof(*new_slots->slot_array));
     if (new_slots->slot_array == NULL) {
@@ -706,23 +708,24 @@ grow_slots(pthread_var_np_t vp, uint32_t slot_idx, int tries)
         new_slots->slot_array[i].vp = vp;
     }
 
-    /* Reserve the slot we wanted */
+    /* Reserve the slot we wanted (new slots not added yet) */
     atomic_write_32(&new_slots->slot_array[slot_idx - nslots].in_use, 1);
 
+    /* Add new slots to logical array of slots */
     if (atomic_cas_ptr((volatile void **)slotsp, NULL, new_slots) != NULL) {
         /*
          * We lost the race to grow the array.  The index we wanted is
-         * not guaranteed to be covered by the grown array.  We fall
-         * through to recurse to repeat.
+         * not guaranteed to be covered by the array as grown by the
+         * winner.  We fall through to recurse to repeat.
          */
         free(new_slots->slot_array);
         free(new_slots);
     }
 
     /*
-     * We won the race to grow the array.  The index we wanted is
-     * guaranteed to be present.  We recurse anyways just in case (it's
-     * fast) and because we fell through if we lost the race.
+     * If we won the race to grow the array then the index we wanted is
+     * guaranteed to be present and recursing here is cheap.  If we lost
+     * the race we need to retry.
      */
     return grow_slots(vp, slot_idx, tries - 1);
 }
@@ -891,7 +894,6 @@ pthread_var_get_np(pthread_var_np_t vp, void **res, uint64_t *version)
 
     if ((slot = pthread_getspecific(vp->tkey)) == NULL) {
         /* First time for this thread -> O(N) slow path (subscribe thread) */
-        slot = get_free_slot(vp);
         if ((slot = get_free_slot(vp)) == NULL) {
             /* Slower path still: grow slots array list */
             slot_idx = atomic_inc_32_nv(&vp->next_slot_idx) - 1;
