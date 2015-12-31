@@ -1008,24 +1008,27 @@ pthread_var_set_np(pthread_var_np_t vp, void *data,
 
     /* Now comes the slow part: garbage collect vp->values.  O(N). */
 
+    /*
+     * Find the index of the largest slot *after* publishing the new value.
+     *
+     * Any new readers past max_slot will be reading the newly-published
+     * value, thus we don't need to consider them.
+     */
+    max_slot = atomic_read_32(&vp->next_slot_idx);
+
     /* Mark; O(N) where N is the number of subscribed threads */
     vp->values->referenced = 1; /* curr value is always in use */
-    max_slot = atomic_read_32(&vp->next_slot_idx);
     for (i = 0, slots = vp->slots; i < max_slot; i++) {
         assert(slots != NULL);
-        if (i >= slots->slot_base + slots->slot_count) {
+        assert(i <= slots->slot_base + slots->slot_count);
+        if (i == slots->slot_base + slots->slot_count) {
             slots = slots->next;
-            assert(slots != NULL);
+            assert(slots != NULL && slots->slot_count > 0);
         }
         slot = &slots->slot_array[i - slots->slot_base];
         if ((value = atomic_read_ptr((volatile void **)&slot->value)) != NULL)
             value->referenced = 1;
     }
-
-    /*
-     * Any new readers past max_slot will be reading the newly-published
-     * value, thus we don't need to consider them.
-     */
 
     /* Sweep; O(N) where N is the number of referenced values */
     for (p = &vp->values; *p != NULL;) {
