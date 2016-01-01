@@ -99,6 +99,9 @@ The two implementations have slightly different characteristics.
    Subscription slot allocation is lock-less.  Indeed, everything is
    lock-less in the reader.
 
+Testing
+-------
+
 A test program is included that hammers the implementation.  Run it in a
 loop, with or without valgrind, ASAN (address sanitizer), or other
 memory checkers, to look for racy bugs.
