@@ -56,8 +56,7 @@ writers.
 How?
 ----
 
-Two implementations are included at this time.  Read the source to find
-out more.
+Two implementations are included at this time.
 
 The two implementations have slightly different characteristics.
 
