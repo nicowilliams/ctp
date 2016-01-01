@@ -4,9 +4,9 @@ Q: What is it?  A: A "thread-safe global variable" for C
 A thread-safe global variable lets readers keep using a value read from
 it until they read the next value.  Memory management is automatic:
 values are automatically destroyed when the last reference is released
-or the last referring thread exits.  Reads are always fast and never
-block writes.  Writes are serialized but otherwise also always fast and
-never block reads.
+(explicitly, or implicitly at the next read, or when a reader thread
+exits).  Reads are *always fast* and _never block writes_.  Writes are
+serialized but otherwise also _always fast_ and *never block reads*.
 
 This is not unlike a Clojure "ref".  It's also similar to RCU, but
 unlike RCU, this has a much simpler API with nothing like
@@ -80,6 +80,9 @@ The two implementations have slightly different characteristics.
    relinquished in order to wait).  Thus reading is mostly lock-less and
    never blocks on contended resources.
 
+   Values are reference counted and so released immediately when the
+   last reference is dropped.
+
  - The other implementation ("slot list") has O(1) reads, and O(N)
    writes (where N is the maximum number of live threads that have read
    the variable), with readers never calling the allocator after the
@@ -98,6 +101,9 @@ The two implementations have slightly different characteristics.
 
    Subscription slot allocation is lock-less.  Indeed, everything is
    lock-less in the reader.
+
+   Values are released at the first write after the last reference is
+   dropped, as values are garbage collected by writers.
 
 Testing
 -------
