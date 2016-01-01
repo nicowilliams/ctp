@@ -67,6 +67,20 @@ The two implementations have slightly different characteristics.
    to signal a potentially-waiting writer -- a blocking operation,
    though on uncontended resources.
 
+   This implementation has a pair of slots, one containing the "current"
+   value and one containing the "previous"/"next" value.  Writers make the
+   "previous" slot into the next "current" slot, and readers read from
+   whichever slot appears to be the current slot.  Values are wrapped
+   with a wrapper that includes a reference count, and they are released
+   when the reference count drops to zero.
+
+   The trick is that writers will wait until the number of active
+   readers of the previous slot is zero.  Thus the last reader of a
+   previous slot must signal a potentially-awaiting writer (which
+   requires taking a lock that the awaiting writer should have
+   relinquished in order to wait).  Thus reading is mostly lock-less and
+   never blocks on contended resources.
+
  - The other implementation ("slot list") has O(1) reads, and O(N)
    writes (where N is the maximum number of live threads that have read
    the variable), with readers never calling the allocator after the
@@ -77,8 +91,18 @@ The two implementations have slightly different characteristics.
    indefinitely if there are higher-priority writers who starve the
    reader of CPU time.
 
+   This implementation has a list of referenced values, with the head of
+   the list always being the current one, and a list of "subscription"
+   slots, one per-reader thread.  Readers allocate a slot on first read,
+   and thence copy the head of the values list to their slots.  Writers
+   have to perform garbage collection on the list of referenced values.
+
+   Subscription slot allocation is lock-less.  Indeed, everything is
+   lock-less in the reader.
+
 A test program is included that hammers the implementation.  Run it in a
-loop, with and without valgrind, to look for racy bugs.
+loop, with or without valgrind, ASAN (address sanitizer), or other
+memory checkers, to look for racy bugs.
 
 Both implementations perform similarly well on the included test.
 
