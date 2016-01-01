@@ -34,7 +34,7 @@ The API is:
     int  pthread_var_wait_np(pthread_var_np_t var);
     void pthread_var_release_np(pthread_var_np_t var);
 
-Value version numbers increase monotonically when set.
+Value version numbers increase monotonically when values are set.
 
 Why?  Because read-write locks are teh worst
 --------------------------------------------
