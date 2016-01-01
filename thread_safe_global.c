@@ -682,7 +682,6 @@ grow_slots(pthread_var_np_t vp, uint32_t slot_idx, int tries)
     uint32_t nslots = 0;
     uint32_t additions;
     uint32_t i;
-    int extra_tries = 0;
     struct slots **slotsp;
     struct slots *new_slots;
 
@@ -703,10 +702,18 @@ grow_slots(pthread_var_np_t vp, uint32_t slot_idx, int tries)
     additions = nslots == 0 ? 4 : nslots + nslots / 2;
     while (nslots + additions < slot_idx) {
         additions *= 2;
-        extra_tries++;
+        /*
+         * In this case we're racing with other readers to grow the slot
+         * list, but if we lose the race then our slot_idx may not be
+         * covered in the list as grown by the winner.  We may have to
+         * try again.
+         *
+         * There's always a winner, so eventually we won't need to try
+         * again.
+         */
+        tries++;
     }
     assert(slot_idx - nslots < additions);
-    tries += extra_tries / 2;
 
     new_slots->slot_array = calloc(additions, sizeof(*new_slots->slot_array));
     if (new_slots->slot_array == NULL) {
@@ -730,6 +737,8 @@ grow_slots(pthread_var_np_t vp, uint32_t slot_idx, int tries)
          * We lost the race to grow the array.  The index we wanted is
          * not guaranteed to be covered by the array as grown by the
          * winner.  We fall through to recurse to repeat.
+         *
+         * See commentary above where tries is incremented.
          */
         free(new_slots->slot_array);
         free(new_slots);
