@@ -15,6 +15,16 @@ ability to make CPUs/threads run, and it has no application-visible
 concept of critical sections, therefore it works in user-land with no
 special kernel support.
 
+ - One thread needs to create the variable by calling
+   `pthread_var_init_np()` and providing a value destructor.
+ - Most threads only ever need to call `pthread_var_get_np()`, and maybe
+   once `pthread_var_wait_np()` to wait until at least one value has
+   been set.
+ - One or more threads may call `pthread_var_set_np()` to publish new
+   values.
+
+The API is:
+
     typedef struct pthread_var_np *pthread_var_np_t;
     typedef void (*pthread_var_destructor_np_t)(void *);
     int  pthread_var_init_np(pthread_var_np_t *var, pthread_var_destructor_np_t value_destructor);
@@ -24,11 +34,7 @@ special kernel support.
     int  pthread_var_wait_np(pthread_var_np_t var);
     void pthread_var_release_np(pthread_var_np_t var);
 
-Most threads only ever need to call `pthread_var_get_np()`, and maybe
-once `pthread_var_wait_np()`; some may need to call
-`pthread_var_set_np()`.  One thread needs to create the variable, with
-`pthread_var_init_np()`.  Readers may, but do not have to, call
-`pthread_var_release_np()`.
+Value version numbers increase monotonically when set.
 
 Why?  Because read-write locks are teh worst
 --------------------------------------------
