@@ -1,5 +1,5 @@
-What is it?  A "thread-safe global variable" for C
---------------------------------------------------
+Q: What is it?  A: A "thread-safe global variable" for C
+--------------------------------------------------------
 
 A thread-safe global variable lets readers keep using a value read from
 it until they read the next value.  Memory management is automatic:
