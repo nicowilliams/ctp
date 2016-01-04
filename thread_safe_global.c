@@ -36,11 +36,29 @@
  *    pthread namespace.
  */
 
+#ifdef HAVE_PTHREAD_YIELD
+#define _GNU_SOURCE
+#endif
+
 #include <assert.h>
 #include <errno.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef HAVE_PTHREAD_YIELD
+#define yield() pthread_yield()
+#else
+#ifdef HAVE_SCHED_YIELD
+#include <sched.h>
+#define yield() sched_yield()
+#else
+#ifdef HAVE_YIELD
+#include <unistd.h>
+#endif /* HAVE_YIELD */
+#endif /* HAVE_SCHED_YIELD */
+#endif /* HAVE_PTHREAD_YIELD */
+
 #include "thread_safe_global_priv.h"
 #include "thread_safe_global.h"
 #include "atomics.h"
@@ -1082,6 +1100,14 @@ pthread_var_set_np(pthread_var_np_t vp, void *data,
         (void) pthread_mutex_unlock(&vp->waiter_lock);
     }
 
+    /*
+     * Because readers must loop, and could be kept from reading by a
+     * long sequence of back-to-back higher-priority writers (presumably
+     * all threads of a process will run with the same priority, but we
+     * don't know that here), we yield the CPU before releasing the
+     * write lock.  Just in case.
+     */
+    yield();
     err = pthread_mutex_unlock(&vp->write_lock);
 
     /* Free old values now with no locks held */
