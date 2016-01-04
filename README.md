@@ -1,12 +1,13 @@
 Q: What is it?  A: A "thread-safe global variable" for C
 --------------------------------------------------------
 
-A thread-safe global variable lets readers keep using a value read from
-it until they read the next value.  Memory management is automatic:
+A thread-safe global variable that lets readers keep using a value read
+from it until they read the next value.  Memory management is automatic:
 values are automatically destroyed when the last reference is released
 (explicitly, or implicitly at the next read, or when a reader thread
-exits).  Reads are *always fast* and _never block writes_.  Writes are
-serialized but otherwise also _always fast_ and *never block reads*.
+exits).  Reads are *lock-less* and fast, and _never block writes_.
+Writes are serialized but otherwise interact with readers without locks,
+thus writes *do not block reads*.
 
 This is not unlike a Clojure "ref".  It's also similar to RCU, but
 unlike RCU, this has a much simpler API with nothing like
