@@ -89,9 +89,10 @@ The two implementations have slightly different characteristics.
    first read in any given thread, and writers never calling the
    allocator while holding a lock.
 
-   But readers have to loop over their fast path, a loop that can run
-   indefinitely if there are higher-priority writers who starve the
-   reader of CPU time.
+   Readers have to loop over their fast path, a loop that can run
+   indefinitely if there are infinitely many higher-priority writers who
+   starve the reader of CPU time.  To help avoid this, writers yield the
+   CPU before relinquishing the write lock.
 
    This implementation has a list of referenced values, with the head of
    the list always being the current one, and a list of "subscription"
