@@ -697,6 +697,7 @@ get_slot(pthread_var_np_t vp, uint32_t slot_idx)
 static int
 grow_slots(pthread_var_np_t vp, uint32_t slot_idx, int tries)
 {
+    uint32_t would_be_nslots;
     uint32_t nslots = 0;
     uint32_t additions;
     uint32_t i;
@@ -717,9 +718,9 @@ grow_slots(pthread_var_np_t vp, uint32_t slot_idx, int tries)
     if ((new_slots = calloc(1, sizeof(*new_slots))) == NULL)
         return errno;
 
-    additions = nslots == 0 ? 4 : nslots + nslots / 2;
+    additions = (nslots == 0) ? 4 : nslots + nslots / 2;
+    would_be_nslots = nslots + additions;
     while (nslots + additions < slot_idx) {
-        additions *= 2;
         /*
          * In this case we're racing with other readers to grow the slot
          * list, but if we lose the race then our slot_idx may not be
@@ -729,6 +730,8 @@ grow_slots(pthread_var_np_t vp, uint32_t slot_idx, int tries)
          * There's always a winner, so eventually we won't need to try
          * again.
          */
+        additions += would_be_nslots + would_be_nslots / 2;
+        would_be_nslots += would_be_nslots + would_be_nslots / 2;
         tries++;
     }
     assert(slot_idx - nslots < additions);
