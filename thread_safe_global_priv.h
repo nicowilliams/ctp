@@ -144,6 +144,7 @@ struct pthread_var_np {
     struct slots        *slots;         /* atomic reader subscription slots */
     uint32_t            next_slot_idx;  /* atomic index of next new slot */
     uint32_t            slots_in_use;   /* atomic count of live readers */
+    uint32_t            nvalues;        /* writer-only; for housekeeping */
 };
 
 #endif

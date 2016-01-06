@@ -45,6 +45,7 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h> /* XXX Debug */
 
 #ifdef HAVE_PTHREAD_YIELD
 #define yield() pthread_yield()
@@ -744,8 +745,8 @@ grow_slots(pthread_var_np_t vp, uint32_t slot_idx, int tries)
     new_slots->slot_count = additions;
     new_slots->slot_base = nslots;
     for (i = 0; i < additions; i++) {
-        new_slots->slot_array[i].value = 0;
         new_slots->slot_array[i].in_use = 0;
+        new_slots->slot_array[i].value = 0;
         new_slots->slot_array[i].vp = vp;
     }
 
@@ -861,6 +862,7 @@ pthread_var_init_np(pthread_var_np_t *vpp,
     vp->slots = NULL;
     vp->dtor = dtor;
     vp->slots_in_use = 1; /* decremented upon destruction */
+    vp->nvalues = 0;
 
     if ((err = pthread_key_create(&vp->tkey, release_slot)) != 0) {
         memset(vp, 0, sizeof(*vp));
@@ -961,11 +963,19 @@ pthread_var_get_np(pthread_var_np_t vp, void **res, uint64_t *version)
      * conditional and that value could get freed if a writer runs
      * between the read in the conditional and the assignment to
      * slot->value with no other readers also succeeding in capturing
-     * that value before that writer completes.  This loop will run just
-     * once if there are no writers, and will run as many times as
-     * writers can run between the conditional and the body.  This loop
-     * can only be an infinite loop if there's an infinite number of
-     * writers who run with higher priority than this thread.
+     * that value before that writer completes.
+     *
+     * This loop will run just once if there are no writers, and will
+     * run as many times as writers can run between the conditional and
+     * the body.  This loop can only be an infinite loop if there's an
+     * infinite number of writers who run with higher priority than this
+     * thread.  This is why writers yield() before dropping their write
+     * lock.
+     *
+     * Note that in the body of this loop we can write a soon-to-become-
+     * invalid value to our slot because many writers can write between
+     * the loop condition and the body.  The writer has to jump through
+     * some hoops to deal with this.
      */
     while (slot->value != (newest = atomic_read_ptr((volatile void **)&vp->values)))
         atomic_write_ptr((volatile void **)&slot->value, newest);
@@ -996,6 +1006,8 @@ pthread_var_release_np(pthread_var_np_t vp)
     atomic_write_32(&slot->in_use, 0);
 }
 
+static struct value *mark_values(pthread_var_np_t);
+
 /**
  * Set new data on a thread-safe global variable
  *
@@ -1012,11 +1024,6 @@ pthread_var_set_np(pthread_var_np_t vp, void *data,
     struct value *new_value;
     struct value *old_values = NULL;
     struct value *value;
-    struct value **p; /* Pointer to list/sub-list head */
-    struct slots *slots;
-    struct slot *slot;
-    uint32_t max_slot;
-    uint32_t i;
     uint64_t vers;
     int err;
 
@@ -1048,18 +1055,120 @@ pthread_var_set_np(pthread_var_np_t vp, void *data,
 
     /* Publish the new value */
     atomic_write_ptr((volatile void **)&vp->values, new_value);
+    vp->nvalues++;
 
-    /* Now comes the slow part: garbage collect vp->values.  O(N). */
+    if (*new_version < 2) {
+        /* Signal waiters */
+        (void) pthread_mutex_lock(&vp->waiter_lock);
+        (void) pthread_cond_signal(&vp->waiter_cv); /* no thundering herd */
+        (void) pthread_mutex_unlock(&vp->waiter_lock);
+    }
+
+    /* Now comes the slow part: garbage collect vp->values */
+    old_values = mark_values(vp);
 
     /*
-     * Find the index of the largest slot *after* publishing the new value.
+     * Because readers must loop, and could be kept from reading by a
+     * long sequence of back-to-back higher-priority writers (presumably
+     * all threads of a process will run with the same priority, but we
+     * don't know that here), we yield the CPU before releasing the
+     * write lock.  Hopefully we yield to a reader.
+     */
+    yield();
+    err = pthread_mutex_unlock(&vp->write_lock);
+
+    /* Free old values now, holding no locks */
+    for (value = old_values; value != NULL; value = old_values) {
+        if (vp->dtor)
+            vp->dtor(value->value);
+        old_values = value->next;
+        free(value);
+    }
+    return err;
+}
+
+int
+value_cmp(const void *a, const void *b)
+{
+    return a < b ? -1 : (a == b ? 0 : 1);
+}
+
+struct value *
+value_binary_search(struct value **seen, size_t min, size_t max, struct value *v)
+{
+    size_t mid;
+
+    if (max <= min + 1) {
+        if (max == min + 1 && seen[min] == v)
+            return seen[min];
+        return NULL;
+    }
+
+    mid = min + ((max - min) >> 1);
+    if (seen[mid] < v)
+        return value_binary_search(seen, min, mid, v);
+    if (seen[mid] > v)
+        return value_binary_search(seen, mid, max, v);
+    return seen[mid];
+}
+
+/*
+ * Make alloca() safe by tripping any guard page if there is one and we
+ * want to allocate enough bytes to blow the stack.
+ */
+static void
+ensure_alloca(size_t bytes)
+{
+    int strack_grows_down;
+    size_t i;
+    char *mem = alloca(bytes);
+
+    strack_grows_down = &mem[bytes - 1] < &mem[0];
+    for (i = 0; i < bytes; i += 4096) {
+        if (strack_grows_down)
+            ((char *)mem)[bytes - i] = 0;
+        else
+            ((char *)mem)[i] = 0;
+    }
+}
+
+#define SAFE_ALLOCA(bytes) (ensure_alloca(bytes), alloca(bytes))
+
+/* Mark half of mark-and-sweep GC */
+static struct value *
+mark_values(pthread_var_np_t vp)
+{
+    struct value **old_values_array;
+    struct value **p;
+    struct value *old_values = NULL;
+    struct value *v;
+    struct value *seen;
+    struct slots *slots;
+    struct slot *slot;
+    uint32_t max_slot;
+    size_t i;
+
+    old_values_array = SAFE_ALLOCA(vp->nvalues * sizeof(old_values_array[0]));
+
+    for (i = 0, v = vp->values; i < vp->nvalues && v != NULL; v = v->next, i++)
+        old_values_array[i] = v;
+    assert(i == vp->nvalues && v == NULL);
+    qsort(old_values_array, vp->nvalues, sizeof(old_values_array[0]),
+          value_cmp);
+
+    /*
+     * Find the index of the largest slot (*after* publishing the new value).
      *
      * Any new readers past max_slot will be reading the newly-published
      * value, thus we don't need to consider them.
      */
     max_slot = atomic_read_32(&vp->next_slot_idx);
 
-    /* Mark; O(N) where N is the number of subscribed threads */
+    /*
+     * Mark. This is O(N log(N)) where N is the number of subscribed
+     * threads, but with the optimizations below, and with a bit of
+     * luck, this is more like O(N) than like O(N log(N))
+     */
     vp->values->referenced = 1; /* curr value is always in use */
     for (i = 0, slots = vp->slots; i < max_slot; i++) {
         assert(slots != NULL);
@@ -1069,58 +1178,58 @@ pthread_var_set_np(pthread_var_np_t vp, void *data,
             assert(slots != NULL && slots->slot_count > 0);
         }
         slot = &slots->slot_array[i - slots->slot_base];
-        if ((value = atomic_read_ptr((volatile void **)&slot->value)) != NULL)
-            value->referenced = 1;
+        if ((v = atomic_read_ptr((volatile void **)&slot->value)) != NULL &&
+            /*
+             * Optimization: ignore slots referring to current value,
+             * since we've already marked that as referenced.
+             */
+            v != vp->values) {
+
+            /*
+             * We can't just dereference v->value->referenced because
+             * there's a window in the get-side where we can set the
+             * slot's value to an immediately-after free()'ed value, and
+             * we could be seeing such a value, which means we can't
+             * dereference it.
+             *
+             * Instead we search for v in the old_values_array[].
+             */
+
+            /* Optimization: also don't search array for vp->values->next */
+            if (v == vp->values->next)
+                vp->values->next->referenced = 1;
+            else if ((seen = value_binary_search(old_values_array, 0,
+                                                 vp->nvalues, v)) != NULL)
+                seen->referenced = 1;
+        }
     }
 
     /* Sweep; O(N) where N is the number of referenced values */
     for (p = &vp->values; *p != NULL;) {
-        value = *p;
+        v = *p;
 
-        if (!value->referenced) {
+        if (!v->referenced) {
             /* Remove from list */
-            assert(value != new_value);
-            *p = value->next;
-            value->next = old_values;
-            old_values = value;
+            assert(v != vp->values);
+            *p = v->next;
+            v->next = old_values;
+            old_values = v;
+            vp->nvalues--;
 
             /* Sweep new [sub-]list */
             continue;
         }
 
         /* Clear */
-        value->referenced = 0;
+        v->referenced = 0;
 
         /* Step into this value's next sub-list */
-        p = &value->next;
+        p = &v->next;
         assert(p != &vp->values);
     }
 
-    if (*new_version < 2) {
-        /* Signal waiters */
-        (void) pthread_mutex_lock(&vp->waiter_lock);
-        (void) pthread_cond_signal(&vp->waiter_cv); /* no thundering herd */
-        (void) pthread_mutex_unlock(&vp->waiter_lock);
-    }
-
-    /*
-     * Because readers must loop, and could be kept from reading by a
-     * long sequence of back-to-back higher-priority writers (presumably
-     * all threads of a process will run with the same priority, but we
-     * don't know that here), we yield the CPU before releasing the
-     * write lock.  Just in case.
-     */
-    yield();
-    err = pthread_mutex_unlock(&vp->write_lock);
-
-    /* Free old values now with no locks held */
-    for (value = old_values; value != NULL; value = old_values) {
-        if (vp->dtor)
-            vp->dtor(value->value);
-        old_values = value->next;
-        free(value);
-    }
-    return err;
+    errno = 0;
+    return old_values;
 }
 
 #endif /* USE_TSGV_SLOT_PAIR_DESIGN */
