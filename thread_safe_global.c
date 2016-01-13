@@ -45,7 +45,6 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h> /* XXX Debug */
 
 #ifdef HAVE_PTHREAD_YIELD
 #define yield() pthread_yield()
@@ -392,17 +391,17 @@ got_a_slot:
             do_signal_writer = 1;
         }
         /*
-         * XXX If vp->next_version hasn't changed since earlier then we
-         * should be able to avoid having to signal a writer when we
-         * decrement what we know is the current slot's nreaders to
-         * zero.  This should read:
+         * Optimization TODO:
          *
-         * if ((atomic_dec_32_nv(&v->nreaders) == 0 &&
-         *      atomic_read_64(&vp->next_version) == vers2) ||
-         *     do_signal_writer)
-         *     err2 = signal_writer(vp);
+         *    If vp->next_version hasn't changed since earlier then we
+         *    should be able to avoid having to signal a writer when we
+         *    decrement what we know is the current slot's nreaders to
+         *    zero.  This should read:
          *
-         * Thus allowing 
+         *    if ((atomic_dec_32_nv(&v->nreaders) == 0 &&
+         *         atomic_read_64(&vp->next_version) == vers2) ||
+         *        do_signal_writer)
+         *        err2 = signal_writer(vp);
          */
         if (atomic_dec_32_nv(&v->nreaders) == 0 || do_signal_writer)
             err2 = signal_writer(vp);
@@ -443,12 +442,13 @@ got_a_slot:
     /*
      * Release the value previously read in this thread, if any.
      *
-     * Note that we call free() here, which means that we can take a
-     * lock.  The application's value destructor also can do the same.
+     * Note that we call free() here, which means that we might take a
+     * lock in free().  The application's value destructor also can do
+     * the same.
      *
-     * TODO/FIXME We could use a lock-less queue/stack to queue up
-     *            wrappers for destruction by writers, then readers
-     *            could be even more light-weight.
+     * TODO We could use a lock-less queue/stack to queue up wrappers
+     *      for destruction by writers, then readers could be even more
+     *      light-weight.
      */
     if (*res != pthread_getspecific(vp->tkey))
         pthread_var_release_np(vp);
@@ -607,7 +607,7 @@ pthread_var_set_np(pthread_var_np_t vp, void *cfdata,
 #else /* USE_TSGV_SLOT_PAIR_DESIGN */
 
 #ifndef USE_TSGV_SUBSCRIPTION_SLOTS_DESIGN
-#error "wat"
+#error "Unknown TSGV implementation name"
 #endif
 
 /*
