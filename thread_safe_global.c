@@ -1121,7 +1121,7 @@ ensure_alloca(size_t bytes)
 {
     int strack_grows_down;
     size_t i;
-    char *mem = alloca(bytes);
+    volatile char *mem = alloca(bytes);
 
     strack_grows_down = &mem[bytes - 1] < &mem[0];
     for (i = 0; i < bytes; i += 4096) {
