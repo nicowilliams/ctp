@@ -1,3 +1,6 @@
+
+NOTE: This repo has moved to https://github.com/cryptonector/ctp
+
 Q: What is it?  A: A "thread-safe global variable" (TSGV) for C
 ---------------------------------------------------------------
 

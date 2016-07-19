@@ -103,7 +103,7 @@ enum magic {
 pthread_var_np_t var;
 
 int
-main(int argc, char **argv)
+main()
 {
     size_t i, k;
     int urandom_fd;
