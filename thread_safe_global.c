@@ -63,13 +63,18 @@
 
 typedef thread_safe_var_dtor_f var_dtor_t;
 
-#ifdef USE_TSV_SLOT_PAIR_DESIGN
+#if 0
+static thread_safe_var *get_var(uint32_t);
+static thread_safe_var *new_var(uint32_t *);
+#endif
+
 /*
  * There are two designs, but one of them is ommited here.
  *
  * See https://github.com/nicowilliams/ctp
  */
 
+#ifdef USE_TSV_SLOT_PAIR_DESIGN
 /*
  * This implements a thread-safe variable.  A thread can read it, and the
  * value it reads will be safe to continue using until it reads it again.
@@ -1345,3 +1350,110 @@ thread_safe_var_wait(thread_safe_var vp)
         return err;
     return err;
 }
+
+#if 0
+/*
+ * Common code.
+ */
+
+struct desc_table {
+    
+};
+
+static volatile uint32_t next_var_idx;
+
+/* Append-only rope of TSVs */
+struct thread_safe_vars {
+    struct thread_safe_vars *next;
+    thread_safe_var **vars;
+    uint32_t nvars;
+};
+static struct thread_safe_vars vars;
+
+static thread_safe_var *
+get_var(uint32_t idx)
+{
+    struct thread_safe_vars *vs;
+
+    for (vs = &vars; vs; vs = atomic_read_ptr((volatile void **)&vs->next)) {
+        uint32_t nvars = atomic_read_32(&vs->nvars);
+        thread_safe_var *vsvars = atomic_read_ptr((volatile void **)&vs->vars);
+
+        if (idx < nvars)
+            return &vsvars[idx];
+        idx -= nvars;
+    }
+    return NULL;
+}
+
+static thread_safe_var *
+new_var(uint32_t *idxp)
+{
+    struct thread_safe_vars *vs, *nvs;
+    thread_safe_var *slot;
+    uint32_t idx, nvars;
+
+    *idxp = idx = atomic_inc_32_nv(&next_var_idx);
+    if ((slot = get_var(idx)))
+        return slot;
+
+    /* Allocate the next vars rope segment */
+    nvs = calloc(1, sizeof(*nvs));
+    if (nvs == NULL)
+        return NULL;
+
+    for (vs = &vars; ; vs = atomic_read_ptr((volatile void **)&vs->next)) {
+        nvars = atomic_read_32(&vs->nvars);
+
+        /* Size the next vars rope segment */
+        nvars = nvars + (nvars >> 1) + 4;
+        if (idx >= nvars)
+            nvars = idx + 4;
+        atomic_write_32(&nvs->nvars, nvars);
+
+        /* Install the next vars rope segment */
+        if (atomic_cas_ptr((volatile void **)&vs->next, NULL, (void *)nvs) == NULL)
+            nvs = NULL; /* This thread's new segment won! */
+
+        /*
+         * Re-read nvars for this new segment as a different thread
+         * might have computed a different value due to the
+         *
+         *   if (idx >= nvars) nvars = idx + 4;
+         *
+         * above.
+         */
+        nvars = atomic_read_32(&vs->nvars);
+        if (idx < nvars) {
+            thread_safe_var *vars = atomic_read_ptr((volatile void **)&vs->vars);
+            thread_safe_var *found;
+
+            /* Race to install the `vars` array in the new rope segment */
+            if (vars == NULL) {
+                vars = calloc(nvars, sizeof(vs->vars[0]));
+                if (vars == NULL) {
+                    free(nvs);
+                    return NULL;
+                }
+                found = atomic_cas_ptr((volatile void **)&vs->vars, NULL, (void *)vars);
+                if (found) {
+                    free(vars);
+                    vars = found;
+                }
+            }
+            return &vars[idx];
+        }
+
+        /*
+         * Lost the race, but we might still have to install a new
+         * segment.
+         */
+        idx -= nvars;
+    }
+}
+
+static pthread_key_t tkey;
+static void once(void)
+{
+}
+#endif

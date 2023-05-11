@@ -46,6 +46,9 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include "array_rope.h"
+#include "desc_tbl.h"
+#include "key.h"
 #include "thread_safe_global.h"
 #include "atomics.h"
 
@@ -158,6 +161,63 @@ usage(const char *arg0, const char *arg, size_t nproc)
     return e;
 }
 
+void
+test_array_rope_1thread(void)
+{
+    array_rope a;
+    void *vp;
+    int ret, idx;
+
+    ret = array_rope_init(&a, sizeof(void *));
+    if (ret)
+        abort();
+    if (array_rope_getp(a, AR_GO_IF_SET, 0))
+        abort();
+    if ((vp = array_rope_getp(a, AR_GO_FORCE, 0)) == NULL)
+        abort();
+    if (array_rope_getp(a, AR_GO_IF_SET, 1))
+        abort();
+    if (array_rope_add(a, &vp, &idx))
+        abort();
+    if (array_rope_getp(a, AR_GO_IF_SET, 1) == NULL)
+        abort();
+    if ((vp = array_rope_getp(a, AR_GO_FORCE, 7)) == NULL) abort();
+    if (array_rope_get_index(a, vp) != 7) abort();
+    if ((vp = array_rope_getp(a, AR_GO_FORCE, 10)) == NULL) abort();
+    if (array_rope_get_index(a, vp) != 10) abort();
+    if ((vp = array_rope_getp(a, AR_GO_FORCE, 51)) == NULL) abort();
+    if (array_rope_get_index(a, vp) != 51) abort();
+    if ((vp = array_rope_getp(a, AR_GO_FORCE, 1000)) == NULL) abort();
+    if (array_rope_get_index(a, vp) != 1000) abort();
+}
+
+void
+test_desc_tbl_1thread(void)
+{
+    desc_tbl t;
+    int ret;
+
+    ret = desc_tbl_init(&t, NULL);
+    if (ret)
+        abort();
+}
+
+void
+test_ctp_key_1thread(void)
+{
+    ctp_key k;
+    int ret;
+
+    ret = ctp_key_create(&k, NULL);
+    if (ret)
+        abort();
+    ret = ctp_key_setspecific(k, &k);
+    if (ret)
+        abort();
+    if (ctp_key_getspecific(k) != &k)
+        abort();
+}
+
 int
 main(int argc, char **argv)
 {
@@ -179,6 +239,10 @@ main(int argc, char **argv)
     ssize_t bytes;
     size_t arg = 0;
     char *e;
+
+    test_array_rope_1thread();
+    test_desc_tbl_1thread();
+    test_ctp_key_1thread();
 
     if (argc >= 6)
         usage(argv[0], NULL, nproc);

@@ -59,11 +59,11 @@ slotlistO3 : slotlist
 	$(CC) $(CFLAGS) -c $<
 
 # XXX Add mapfile, don't export atomics
-libtsgv.so: thread_safe_global.o atomics.o
+libtsgv.so: array_rope.o bitmask_rope.o atthread_exit.o desc_tbl.o key.o thread_safe_global.o atomics.o
 	$(CC) $(CSANFLAG) -shared -o libtsgv.so $(LDFLAGS) $(LDLIBS) $^
 
 t: t.o libtsgv.so
 	$(CC) $(CSANFLAG) -pie -o $@ $^ $(LDFLAGS) $(LDLIBS) -Wl,-rpath,$(PWD) -L$(PWD) -ltsgv
 
 clean:
-	rm -f t t.o libtsgv.so thread_safe_global.o atomics.o
+	rm -f t t.o libtsgv.so thread_safe_global.o atomics.o array_rope.o bitmask_rope.o atthread_exit.o desc_tbl.o key.o
