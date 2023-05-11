@@ -173,13 +173,13 @@ atomic_dec_64_nv(volatile uint64_t *p)
 }
 
 void *
-atomic_cas_ptr(volatile void **p, void *oldval, void *newval)
+atomic_cas_ptr(volatile void **p, const void *oldval, const void *newval)
 {
     void *r;
 
     ANNOTATE_HAPPENS_AFTER(*p);
 #ifdef HAVE___ATOMIC
-    volatile void *expected = oldval;
+    volatile const void *expected = oldval;
     (void) __atomic_compare_exchange_n(p, &expected, newval, 1, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
     r = (void *)(uintptr_t)/*drop volatile*/expected;
 #elif defined(HAVE___SYNC)
@@ -339,7 +339,7 @@ atomic_read_64(volatile uint64_t *p)
 }
 
 void
-atomic_write_ptr(volatile void **p, void *v)
+atomic_write_ptr(volatile void **p, const void *v)
 {
 #ifdef HAVE___ATOMIC
     __atomic_store_n(p, v, __ATOMIC_RELEASE);
