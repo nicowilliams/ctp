@@ -50,7 +50,7 @@ typedef struct desc_tbl_cursor_s *desc_tbl_cursor;
 typedef int (*desc_tbl_close_f)(volatile void *);
 
 int  desc_tbl_init(volatile desc_tbl *, desc_tbl_close_f);
-void desc_tbl_destroy(desc_tbl);
+void desc_tbl_destroy(desc_tbl *);
 
 int  desc_tbl_open(desc_tbl, void *, desc_tbl_elt *, int *, uint64_t *);
 int  desc_tbl_get_p(desc_tbl, desc_tbl_elt, uint64_t, void **);

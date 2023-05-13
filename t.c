@@ -168,19 +168,12 @@ test_array_rope_1thread(void)
     void *vp;
     int ret, idx;
 
-    ret = array_rope_init(&a, sizeof(void *));
-    if (ret)
-        abort();
-    if (array_rope_getp(a, AR_GO_IF_SET, 0))
-        abort();
-    if ((vp = array_rope_getp(a, AR_GO_FORCE, 0)) == NULL)
-        abort();
-    if (array_rope_getp(a, AR_GO_IF_SET, 1))
-        abort();
-    if (array_rope_add(a, &vp, &idx))
-        abort();
-    if (array_rope_getp(a, AR_GO_IF_SET, 1) == NULL)
-        abort();
+    if ((ret = array_rope_init(&a, sizeof(void *)))) abort();
+    if (array_rope_getp(a, AR_GO_IF_SET, 0)) abort();
+    if ((vp = array_rope_getp(a, AR_GO_FORCE, 0)) == NULL) abort();
+    if (array_rope_getp(a, AR_GO_IF_SET, 1)) abort();
+    if (array_rope_add(a, &vp, &idx)) abort();
+    if (array_rope_getp(a, AR_GO_IF_SET, 1) == NULL) abort();
     if ((vp = array_rope_getp(a, AR_GO_FORCE, 7)) == NULL) abort();
     if (array_rope_get_index(a, vp) != 7) abort();
     if ((vp = array_rope_getp(a, AR_GO_FORCE, 10)) == NULL) abort();
@@ -189,6 +182,7 @@ test_array_rope_1thread(void)
     if (array_rope_get_index(a, vp) != 51) abort();
     if ((vp = array_rope_getp(a, AR_GO_FORCE, 1000)) == NULL) abort();
     if (array_rope_get_index(a, vp) != 1000) abort();
+    array_rope_destroy(&a);
 }
 
 void
@@ -197,9 +191,8 @@ test_desc_tbl_1thread(void)
     desc_tbl t;
     int ret;
 
-    ret = desc_tbl_init(&t, NULL);
-    if (ret)
-        abort();
+    if ((ret = desc_tbl_init(&t, NULL))) abort();
+    desc_tbl_destroy(&t);
 }
 
 void
@@ -208,14 +201,10 @@ test_ctp_key_1thread(void)
     ctp_key k;
     int ret;
 
-    ret = ctp_key_create(&k, NULL);
-    if (ret)
-        abort();
-    ret = ctp_key_setspecific(k, &k);
-    if (ret)
-        abort();
-    if (ctp_key_getspecific(k) != &k)
-        abort();
+    if ((ret = ctp_key_create(&k, NULL))) abort();
+    if ((ret = ctp_key_setspecific(k, &k))) abort();
+    if (ctp_key_getspecific(k) != &k) abort();
+    ctp_key_delete(&k);
 }
 
 int

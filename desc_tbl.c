@@ -46,6 +46,9 @@
 #include "desc_tbl.h"
 #include "atomics.h"
 
+#define OFFSETOF(type,memb) ((size_t)(uintptr_t)&((type*)0)->memb)
+#define ALIGNOF(type) OFFSETOF(struct { char c; type member; }, member)
+
 typedef struct desc_tbl_hazards *desc_tbl_hazards;
 
 /*
@@ -65,9 +68,7 @@ struct desc_tbl_s {
     ctp_key key;                /* Per-thread hazard pointers, linked up */
     desc_tbl_hazards hazards;   /* All the hazard pointers for this tbl */
     desc_tbl_close_f closef;    /* Descriptor value destructor */
-    desc_tbl next;              /* Next chunk */
-    desc_tbl_elt elts;          /* This chunk */
-    size_t nelts;               /* Allocations in this chunk */
+    array_rope a;               /* The descriptors array */
 };
 
 /* An element wrapper has a value and a verifier */
@@ -112,26 +113,6 @@ cleanup(void *value)
     atomic_write_32(&h->inuse, 0);
 }
 
-static int
-calloc_chunk(size_t prev_nelts, desc_tbl *out)
-{
-    size_t nelts = prev_nelts + (prev_nelts >> 1) + 8;
-    size_t sz = 2 * sizeof(struct desc_tbl_s) +
-        nelts * sizeof(struct desc_tbl_elt_s);
-
-    *out = NULL;
-
-    /* Overflow protection */
-    if (nelts >= (SIZE_MAX >> 6) / sizeof(struct desc_tbl_elt_s) ||
-        nelts >= (SIZE_MAX >> 6) / (2 * sizeof(struct desc_tbl_s)))
-        return EOVERFLOW;
-
-    if ((*out = calloc(1, sz)) == NULL)
-        return ENOMEM;
-    (*out)->nelts = nelts;
-    return 0;
-}
-
 /**
  * Allocates and initializes a generic descriptor table.
  *
@@ -143,20 +124,20 @@ int
 desc_tbl_init(volatile desc_tbl *out, desc_tbl_close_f closef)
 {
     desc_tbl t;
-    size_t i;
     int ret;
 
     *out = NULL;
 
-    if ((ret = calloc_chunk(0, &t)))
+    if ((t = calloc(1, sizeof(*t))) == NULL)
+        return ENOMEM;
+    if ((ret = array_rope_init(&t->a, ALIGNOF(struct desc_tbl_elt_s)))) {
+        free(t);
         return ret;
-    t->elts = (void *)(t + 1);
+    }
     t->closef = closef;
     t->hazards = NULL;
 
     if (closef) {
-        int ret;
-
         /*
          * We need a ctp_key in order to drive garbage collection when a
          * destructor is provided.  But ctp_key's implementation needs a
@@ -170,8 +151,6 @@ desc_tbl_init(volatile desc_tbl *out, desc_tbl_close_f closef)
         }
     }
 
-    for (i = 0; i < t->nelts; i++)
-        t->elts[i].value = NULL;
     atomic_write_ptr((volatile void **)out, t);
     return 0;
 }
@@ -181,11 +160,13 @@ desc_tbl_init(volatile desc_tbl *out, desc_tbl_close_f closef)
  * function does no synchronization of any kind.
  */
 void
-desc_tbl_destroy(desc_tbl tbl)
+desc_tbl_destroy(desc_tbl *tblp)
 {
+    array_rope_cursor c = NULL;
     desc_tbl_hazards h, hnext;
-    desc_tbl p, next;
-    size_t i;
+    desc_tbl tbl = *tblp;
+
+    *tblp = NULL;
 
     for (h = tbl->hazards; h; h = hnext) {
         hnext = h->next;
@@ -193,17 +174,21 @@ desc_tbl_destroy(desc_tbl tbl)
     }
     tbl->hazards = NULL;
 
-    for (next = tbl; next; ) {
-        if (tbl->closef) {
-            for (i = 0; i < next->nelts; i++)
-                if (next->elts[i].value)
-                    tbl->closef(next->elts[i].value);
+    if (tbl->closef) {
+        array_rope_cursor c = NULL;
+        void *ve;
+        int ret, idx;
+
+        while ((ret = array_rope_iter(tbl->a, &c, &idx, &ve)) == 0) {
+            desc_tbl_elt e = ve;
+
+            if (e->value)
+                tbl->closef(e->value);
         }
-        p = next;
-        next = next->next;
-        p->next = NULL;
-        free(p);
     }
+    array_rope_iter_free(&c);
+    array_rope_destroy(&tbl->a);
+    free(tbl);
 }
 
 /* Return this thread's hazard pointer, allocating if need be */
@@ -258,66 +243,50 @@ get_hazard(desc_tbl tbl)
  * The `verifier' number output must be used to close descriptors.
  */
 int
-desc_tbl_open(desc_tbl tbl, void *value, desc_tbl_elt *e, int *n, uint64_t *verifier)
+desc_tbl_open(desc_tbl tbl, void *value, desc_tbl_elt *ep, int *np, uint64_t *verifier)
 {
+    array_rope_cursor c = NULL;
     desc_tbl_hazards h = NULL;
-    desc_tbl last = tbl;
-    desc_tbl p, next;
-    size_t i;
-    int d = 0;
+    void *ve;
     int ret;
 
-    *verifier = 0;
-    if (!e && !n)
+    *verifier = atomic_inc_64_nv(&next_verifier);
+    if (!ep && !np)
         return EINVAL;
-    if (e)
-        *e = NULL;
-    if (n)
-        *n = -1;
+    if (ep)
+        *ep = NULL;
+    if (np)
+        *np = -1;
 
     if (tbl->key) {
         if ((h = get_hazard(tbl)) == NULL)
             return ENOMEM;
-        atomic_write_ptr((volatile void **)&h->value, value);
+        atomic_write_ptr(&h->value, NULL);
     }
 
-    for (;;) {
-        /* Look for a free slot */
-        for (p = last;
-             p && d < (INT_MAX >> 4);
-             p = atomic_read_ptr((volatile void **)&p->next)) {
-            last = p;
-            for (i = 0; i < p->nelts; d++, i++) {
-                if (atomic_read_ptr(&p->elts[i].value) == NULL) {
-                    if (atomic_cas_ptr(&p->elts[i].value,
-                                       NULL, value) == NULL)
-                        break; /* Got it! */
-                }
-            }
-            if (i < p->nelts) {
-                atomic_write_64(&p->elts[i].verifier, *verifier = atomic_inc_64_nv(&next_verifier));
-                if (e)
-                    *e = &p->elts[i];
-                if (n)
-                    *n = d;
-                return 0;
-            }
+    /* Look for a free slot */
+    while ((ret = array_rope_iter(tbl->a, &c, np, &ve)) == 0) {
+        desc_tbl_elt e = ve;
+
+        if (atomic_cas_ptr(&e->value, NULL, value) == NULL &&
+            atomic_cas_64(&e->verifier, 0, *verifier) == 0) {
+            array_rope_iter_free(&c);
+            atomic_write_ptr(&h->value, value);
+            return 0;
         }
-
-        /* Ran off the end; add a new chunk */
-        if ((ret = calloc_chunk(last->nelts, &next)))
-            return ret;
-        next->elts = (void *)(next + 1);
-        if (atomic_cas_ptr((volatile void **)&last->next,
-                           NULL, next) != NULL)
-            free(next); /* Lost the race to add the new chunk */
-
-        /* There's a new chunk now */
     }
 
-    if (h)
-        atomic_write_ptr((volatile void **)&h->value, NULL);
-    return EMFILE;
+    array_rope_iter_free(&c);
+    if (ret == -1 && (ret = array_rope_add(tbl->a, &ve, np)) == 0) {
+        desc_tbl_elt e = ve;
+
+        atomic_write_ptr(&e->value, value);
+        atomic_write_64(&e->verifier, *verifier);
+        if (h)
+            atomic_write_ptr(&h->value, value);
+        return 0;
+    }
+    return ret;
 }
 
 /**
@@ -342,7 +311,7 @@ desc_tbl_get_p(desc_tbl tbl, desc_tbl_elt e, uint64_t verifier, void **vp)
     if (tbl->key) {
         if ((h = get_hazard(tbl)) == NULL)
             return ENOMEM;
-        atomic_write_ptr((volatile void **)&h->value, value);
+        atomic_write_ptr(&h->value, value);
     }
 
     *vp = value;
@@ -360,41 +329,33 @@ int
 desc_tbl_get_n(desc_tbl tbl, int n, uint64_t verifier, desc_tbl_elt *ep, void **vp)
 {
     desc_tbl_hazards h = NULL;
-    desc_tbl p;
-    size_t d, i;
+    desc_tbl_elt e;
+    void *ve, *value;
+    int ret;
+
+    if (ep)
+        *ep = NULL;
+    if (vp)
+        *vp = NULL;
 
     if (tbl->key) {
         if ((h = get_hazard(tbl)) == NULL)
             return ENOMEM;
     }
 
-    if (n < 0 || n >= INT_MAX >> 4)
-        return EINVAL;
-
+    if ((ret = array_rope_get(tbl->a, AR_GO_IF_SET, n, &ve)))
+        return ret;
+    e = ve;
+    if (!verifier || atomic_read_64(&e->verifier) != verifier)
+        return EBADF;
     if (ep)
-        *ep = NULL;
-    if (vp)
-        *vp = NULL;
-    for (d = n, p = tbl; p && d < (INT_MAX >> 4); p = p->next) {
-        for (i = 0; i <= d && i < p->nelts; d++, i++) {
-            if (i == d) {
-                if (!verifier || p->elts[i].verifier != verifier)
-                    return EBADF;
-                if (ep)
-                    *ep = &p->elts[i];
-                if (vp)
-                    *vp = (void *)p->elts[i].value;
-                if (h)
-                    atomic_write_ptr((volatile void **)&h->value,
-                                     (void *)p->elts[i].value);
-                return 0;
-            }
-        }
-        if (i > d)
-            return ENOENT;
-        d -= p->nelts;
+        *ep = ve;
+    if (vp) {
+        vp = value = atomic_read_ptr(&e->value);
+        if (h)
+            atomic_write_ptr(&h->value, value);
     }
-    return ENOENT;
+    return 0;
 }
 
 /**
@@ -406,14 +367,15 @@ desc_tbl_put(desc_tbl tbl)
     desc_tbl_hazards h;
 
     if (tbl->key && (h = get_hazard(tbl))) {
-        void *v = atomic_read_ptr((volatile void **)&h->value);
+        void *v = atomic_read_ptr(&h->value);
 
-        atomic_write_ptr((volatile void **)&h->value, NULL);
+        atomic_write_ptr(&h->value, NULL);
         gc(tbl, v);
     }
 }
 
 struct desc_tbl_cursor_s {
+    array_rope_cursor c;
     desc_tbl tbl;
     size_t i;
     int d;
@@ -422,8 +384,13 @@ struct desc_tbl_cursor_s {
 void
 desc_tbl_iter_free(desc_tbl_cursor *cursorp)
 {
-    free(*cursorp);
+    desc_tbl_cursor c = *cursorp;
+
     *cursorp = NULL;
+    if (c) {
+        array_rope_iter_free(&c->c);
+        free(c);
+    }
 }
 
 /**
@@ -443,56 +410,43 @@ desc_tbl_iter(desc_tbl tbl,
               desc_tbl_elt *ep,
               void **vp)
 {
-    desc_tbl_cursor cursor = *cursorp;
+    desc_tbl_cursor c = *cursorp;
     uint64_t verifier;
-    desc_tbl_elt e;
-    int d = -1;
+    void *ve;
+    int ret;
 
     /* Initialize outputs */
-    if (dp)
-        *dp = -1;
-    if (verifierp)
-        *verifierp = 0;
+    *dp = -1;
+    *verifierp = 0;
     if (ep)
         *ep = NULL;
-    if (vp)
-        *vp = NULL;
-    if (cursor == NULL) {
-        if ((cursor = calloc(1, sizeof(*cursor))) == NULL)
+    *vp = NULL;
+    if (c == NULL) {
+        if ((c = calloc(1, sizeof(*c))) == NULL)
             return ENOMEM;
-        cursor->tbl = tbl;
-        cursor->i = 0;
-        cursor->d = 0;
-        *cursorp = cursor;
+        c->tbl = tbl;
+        c->c = NULL;
+        c->i = 0;
+        c->d = 0;
+        *cursorp = c;
     }
 
-    do {
-        if (cursor->tbl && cursor->i == cursor->tbl->nelts) {
-            cursor->tbl = atomic_read_ptr((volatile void **)&cursor->tbl->next);
-            cursor->i = 0;
-        }
+    while ((ret = array_rope_iter(tbl->a, &c->c, dp, &ve)) == 0) {
+        desc_tbl_elt e = ve;
 
-        if (cursor->tbl == NULL) {
-            free(cursor);
-            *cursorp = NULL;
-            return -1;
-        }
+        if (ep)
+            *ep = ve;
+        *vp = atomic_read_ptr(&e->value);
+        *verifierp = verifier = atomic_read_64(&e->verifier);
+        
+        if (*vp != NULL && verifier != 0 && verifier != (uint64_t)-1)
+            return 0;
+    }
 
-        e = &cursor->tbl->elts[cursor->i++];
-        d = cursor->d++;
-    } while (atomic_read_ptr(&e->value) == NULL ||
-             (verifier = atomic_read_64(&e->verifier) == 0) ||
-             verifier == (uint64_t)-1);
-
-    if (dp)
-        *dp = d;
-    if (verifierp)
-        *verifierp = e->verifier;
-    if (ep)
-        *ep = e;
-    if (vp)
-        *vp = (void *)e->value;
-    return 0;
+    array_rope_iter_free(&c->c);
+    free(c);
+    *cursorp = NULL;
+    return ret;
 }
 
 /**

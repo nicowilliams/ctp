@@ -312,7 +312,7 @@ array_rope_iter(array_rope a,
     if (cursor->a && cursor->i == atomic_read_32(&cursor->a->nelts)) {
         if (cursor->i < atomic_read_32(&cursor->a->nalloced)) {
             array_rope_iter_free(cursorp);
-            return 0;
+            return -1;
         }
         cursor->a = atomic_read_ptr((volatile void **)&cursor->a->next);
         cursor->i = 0;
