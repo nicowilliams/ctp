@@ -1,11 +1,25 @@
 
 > NOTE: This repo is mirrored at https://github.com/cryptonector/ctp and https://github.com/nicowilliams/ctp
 
-# Q: What is it?  A: A user-land-RCU-like API for C, permissively licensed
+# Q: What is it?  A: Lock-free Data Structures and APIs for C, Particularly RCU, Permissively Licensed
 
-This repository's only current feature is a read-copy-update (RCU) like,
-thread-safe variable (TSV) for C.  More C thread-primitives may be added
-in the future, thus the repository's name being quite generic.
+This repository's current features are:
+
+ - a lock-free/wait-free read-copy-update (RCU) like, thread-safe
+   variable (TSV) for C with a very simple API (get & set)
+ - a hazard-pointer data structure and API for C
+ - a lock-free array list for C
+ - a lock-free "descriptor table" for C (much like POSIX file descriptor
+   tables, but for other things than open files)
+ - a pthread key multiplexer to avoid running out of pthread keys
+
+Upcoming:
+
+ - a lock-free hash table with similar semantics to the thread-safe
+   variable (TSV)
+
+More C thread-primitives may be added in the future, thus the
+repository's name being quite generic.
 
 A TSV lets readers safely keep using a value read from the TSV until
 they read the next value.  Memory management is automatic: values are
@@ -28,6 +42,27 @@ nothing like `synchronize_rcu()`, and doesn't require any cross-CPU
 calls nor the ability to make CPUs/threads run, and it has no
 application-visible concept of critical sections, therefore it works in
 user-land with no special kernel support.
+
+> I wrote TSVs back in 2012, and at the time I was not aware of the term
+> "hazard pointer" for the technique I used in one of the TSV
+> implementations.  Hazard pointers compose and thus scale very well as
+> a development technique, so I'm making a first-class hazard pointer
+> data structure and API (public API) to help construct other lock-free
+> data structures than just TSVs.
+>
+> Hazard pointers allow one to use a trivial loop over atomically
+> reading a shared location and writing to a thread-local "hazard
+> pointer" until the latter is seen to have the same value as the
+> former.  Values referenced by hazard pointers are not to be destroyed,
+> with no need for reference counting.
+>
+> The main down side to the hazard pointer technique is that a garbage
+> collection step is needed occasionally.  For rarely-written pointer
+> variables the garbage collection step is only needed when writing.
+> For pointer variables written very often the readers will also often
+> have to execute the garbage collection.  Garbage collection is O(N)
+> where N is the number of live threads that have read a pointer
+> variable protected by hazard pointers, so this is not so bad.
 
  - One thread needs to create the variable (as many as desired) once by
    calling `thread_safe_var_init()` and providing a value destructor.
