@@ -61,6 +61,97 @@ void desc_tbl_iter_free(desc_tbl_cursor *);
 int  desc_tbl_close_p(desc_tbl, desc_tbl_elt, uint64_t);
 int  desc_tbl_close_n(desc_tbl, int, uint64_t);
 
+#define CTP_OFFSETOF(type,memb) ((size_t)(uintptr_t)&((type*)0)->memb)
+#define CTP_ALIGNOF(type) CTP_OFFSETOF(struct { char c; type member; }, member)
+
+#define MAKE_DESC_TBL_OF_TYPE(name, type)                               \
+typedef struct desc_tbl_of_ ## name ## _s {                             \
+    desc_tbl t;                                                         \
+} desc_tbl_of_ ## name;                                                 \
+typedef struct desc_tbl_of_ ## name ## _elt_s {                         \
+    desc_tbl_elt e;                                                     \
+} desc_tbl_of_ ## name ## _elt;                                         \
+typedef struct desc_tbl_of_ ## name ## _cursor_s {                      \
+    desc_tbl_cursor c;                                                  \
+} desc_tbl_of_ ## name ## _cursor;                                      \
+typedef int (*desc_tbl_of_ ## name ## _close_f)(volatile void *);       \
+static inline int                                                       \
+desc_tbl_of_ ## name ## _init(volatile desc_tbl_of_ ## name *tbl,       \
+                             desc_tbl_of_ ## name ## _close_f closef)   \
+{                                                                       \
+    return desc_tbl_init(&tbl->a, (desc_tbl_close_f)closef);            \
+}                                                                       \
+static inline void                                                      \
+desc_tbl_of_ ## name ## _destroy(desc_tbl_of_ ## name *tbl)             \
+{                                                                       \
+    desc_tbl_destroy(tbl.t);                                            \
+}                                                                       \
+static inline int                                                       \
+desc_tbl_of_ ## name ## _open(desc_tbl_of_ ## name tbl,                 \
+                             type v,                                    \
+                             desc_tbl_of_ ## name ## _elt *ep,          \
+                             int *idxp,                                 \
+                             uint64_t *verifierp)                       \
+{                                                                       \
+    return desc_tbl_open(tbl.t, v, &ep->e, idxp, verifierp);            \
+}                                                                       \
+static inline int                                                       \
+desc_tbl_of_ ## name ## _get_p(desc_tbl_of_ ## name tbl,                \
+                              desc_tbl_of_ ## name ## _elt e,           \
+                              uint64_t verifier,                        \
+                              type *vp)                                 \
+{                                                                       \
+    desc_tbl_get_p(tbl.t, e.e, verifier, (void **)vp);                  \
+}                                                                       \
+static inline int                                                       \
+desc_tbl_of_ ## name ## _get_n(desc_tbl_of_ ## name tbl,                \
+                              int idx,                                  \
+                              uint64_t verifier,                        \
+                              desc_tbl_of_ ## name ## _elt *ep,         \
+                              type *vp)                                 \
+{                                                                       \
+    return desc_tbl_get_n(tbl.t, idx, verifier, &ep->e, (void **)vp);   \
+}                                                                       \
+static inline void                                                      \
+desc_tbl_of_ ## name ## _put(desc_tbl_of_ ## name);                     \
+{                                                                       \
+    desc_tbl_put(tbl.t);                                                \
+}                                                                       \
+static inline int                                                       \
+desc_tbl_of_ ## name ## _iter(desc_tbl_of_ ## name tbl,                 \
+                             desc_tbl_of_ ## name ## _cursor *cp,       \
+                             int *idxp,                                 \
+                             uint64_t *verifierp,                       \
+                             desc_tbl_of_ ## name ## _elt *ep,          \
+                             type *vp)                                  \
+{                                                                       \
+    return desc_tbl_iter(tbl.t, &cp.c, idxp, verifierp, &ep->e,         \
+                         (void **)vp);                                  \
+}                                                                       \
+static inline void                                                      \
+desc_tbl_of_ ## name ## _iter_free(desc_tbl_of_ ## name ## _cursor *cp) \
+{                                                                       \
+    desc_tbl_iter_free(&cp.c);                                          \
+}                                                                       \
+static inline int                                                       \
+desc_tbl_of_ ## name ## _close_p(desc_tbl_of_ ## name tbl,              \
+                                 desc_tbl_of_ ## name ## _elt e,        \
+                                 uint64_t verifier)                     \
+{                                                                       \
+    return desc_tbl_close_p(tbl.t, e.e, verifier);                      \
+}                                                                       \
+static inline int                                                       \
+desc_tbl_of_ ## name ## _close_n(desc_tbl_of_ ## name tbl,              \
+                                 int idx,                               \
+                                 uint64_t verifier)                     \
+{                                                                       \
+    return desc_tbl_close_n(tbl.a, idx, verifier);                      \
+}                                                                       \
+
+#define MAKE_DESC_TBL_OF_TYPEDEF(typename)                          \
+    MAKE_DESC_TBL_OF_TYPEDEF(typename, typename)
+
+
 #ifdef __cplusplus
 }
 #endif

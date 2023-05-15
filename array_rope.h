@@ -59,6 +59,57 @@ int  array_rope_get_index(array_rope, void *);
 int  array_rope_iter(array_rope, array_rope_cursor *, int *, void **);
 void array_rope_iter_free(array_rope_cursor *);
 
+#define CTP_OFFSETOF(type,memb) ((size_t)(uintptr_t)&((type*)0)->memb)
+#define CTP_ALIGNOF(type) CTP_OFFSETOF(struct { char c; type member; }, member)
+
+#define MAKE_ARRAY_OF_TYPE(name, type)                              \
+static inline int                                                   \
+array_rope_of_ ## name ## _init(volatile array_rope *ap)            \
+{                                                                   \
+    return array_rope_init(ap, CTP_ALIGNOF(type));                  \
+}                                                                   \
+static inline int                                                   \
+array_rope_of_ ## name ## _add(array_rope a, type *v, int *idx)     \
+{                                                                   \
+    return array_rope_add(a, (void *v), idx);                       \
+}                                                                   \
+static inline int                                                   \
+array_rope_of_ ## name ## _get(array_rope a,                        \
+                               array_rope_get_options opt,          \
+                               int idx, type *vp)                   \
+{                                                                   \
+    return array_rope_get(a, opt, idx, (void **)vp);                \
+}                                                                   \
+static inline type                                                  \
+array_rope_of_ ## name ## _getp(array_rope a,                       \
+                                array_rope_get_options opt,         \
+                                int idx)                            \
+{                                                                   \
+    return array_rope_getp(a, opt, idx);                            \
+}                                                                   \
+static inline int                                                   \
+array_rope_of_ ## name ## _get_index(array_rope a, type v)          \
+{                                                                   \
+    return array_rope_get_index(a, v);                              \
+}                                                                   \
+static inline int                                                   \
+array_rope_of_ ## name ## _iter(array_rope a,                       \
+                                array_rope_cursor *c,               \
+                                int *idxp,                          \
+                                type *vp)                           \
+{                                                                   \
+    return array_rope_iter(a, c, idxp, (void **)vp);                \
+}                                                                   \
+static inline void                                                  \
+array_rope_of_ ## name ## _iter_free(array_rope_cursor *c)          \
+{                                                                   \
+    array_rope_iter_free(c);                                        \
+}                                                                   \
+
+#define MAKE_ARRAY_OF_TYPEDEF(typename)                             \
+    MAKE_ARRAY_OF_TYPEDEF(typename, typename)
+
+
 #ifdef __cplusplus
 }
 #endif

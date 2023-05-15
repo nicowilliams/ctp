@@ -80,7 +80,7 @@ struct desc_tbl_elt_s {
 /* XXX A random number would be a better verifier */
 static volatile uint64_t next_verifier = 1;
 
-/* Hazard pointers (one per-dec_tbl) */
+/* Hazard pointers (one per-desc_tbl) */
 struct desc_tbl_hazards {
     volatile desc_tbl tbl;
     volatile void *value;

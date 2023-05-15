@@ -54,4 +54,24 @@ void atomic_write_ptr(volatile void **, const void *);
 void atomic_write_32(volatile uint32_t *, uint32_t);
 void atomic_write_64(volatile uint64_t *, uint64_t);
 
+#define MAKE_ATOMICS_OF_TYPE(name, type)                            \
+static inline type                                                  \
+atomic_cas_ ## name(volatile type *vp, const type ov, const type nv)\
+{                                                                   \
+    return atomic_cas_ptr((volatile void **)vp, (void *)ov,         \
+                          (void *)nv);                              \
+}                                                                   \
+static inline type atomic_read_ ## name(volatile type *vp)          \
+{                                                                   \
+    return atomic_read_ptr((volatile void **)vp);                   \
+}                                                                   \
+static inline void atomic_write_ ## name(volatile type *vp,         \
+                                         const type nv)             \
+{                                                                   \
+    atomic_write_ptr((volatile void **)vp, (const void *)nv);       \
+}
+
+#define MAKE_ATOMICS_OF_TYPEDEF(typename)                                   \
+    MAKE_ATOMICS_OF_TYPE(typename, typename)
+
 #endif /* ATOMICS_H */
