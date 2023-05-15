@@ -55,15 +55,35 @@ slotlistO2 : slotlist
 slotlistO3 : COPTFLAG = -O3
 slotlistO3 : slotlist
 
+LIB_SRCS = array_rope.c bitmask_rope.c atthread_exit.c desc_tbl.c key.c thread_safe_global.c atomics.c
+TEST_SRCS = t.c
+SRCS = $(LIB_SRCS) $(TEST_SRCS)
+
+LIB_OBJS := $(LIB_SRCS:%.c=%.o)
+TEST_OBJS := $(TEST_SRCS:%.c=%.o)
+OBJS := $(LIB_OBJS) $(TEST_OBJS)
+
+depend: .depend
+
+.depend: $(SRCS)
+	rm -f "$@"
+	$(CC) $(CFLAGS) -MM $^ > "$@"
+
+include .depend
+
 .c.o:
 	$(CC) $(CFLAGS) -c $<
 
-# XXX Add mapfile, don't export atomics
-libtsgv.so: array_rope.o bitmask_rope.o atthread_exit.o desc_tbl.o key.o thread_safe_global.o atomics.o
+# XXX Add mapfile, don't export atomics -- or do export atomics but
+# prefix them to avoid conflicts.
+libtsgv.so: $(LIB_OBJS)
 	$(CC) $(CSANFLAG) -shared -o libtsgv.so $(LDFLAGS) $(LDLIBS) $^
 
-t: t.o libtsgv.so
+t: $(TEST_SRCS) libtsgv.so
 	$(CC) $(CSANFLAG) -pie -o $@ $^ $(LDFLAGS) $(LDLIBS) -Wl,-rpath,$(PWD) -L$(PWD) -ltsgv
 
+check: t
+	./t
+
 clean:
-	rm -f t t.o libtsgv.so thread_safe_global.o atomics.o array_rope.o bitmask_rope.o atthread_exit.o desc_tbl.o key.o
+	rm -f t libtsgv.so $(OBJS) .depend
