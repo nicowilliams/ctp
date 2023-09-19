@@ -183,7 +183,7 @@ ctp_hazards_destroy(ctp_hazards *hp, ctp_hazards_dtor_f dtor)
  */
 ctp_hazards
 ctp_hazards_get(volatile ctp_hazards *hp,
-                void *key,
+                void *key, /* XXX Make this a union */
                 ctp_key_getspecific_f get,
                 ctp_key_setspecific_f set)
 {

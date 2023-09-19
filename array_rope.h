@@ -46,8 +46,8 @@ typedef struct array_rope_s *array_rope;
 typedef struct array_rope_cursor_s *array_rope_cursor;
 typedef enum array_rope_get_options_e {
     AR_GO_IF_SET = 1,
-    AR_GO_FORCE  = 2}
-array_rope_get_options;
+    AR_GO_FORCE  = 2
+} array_rope_get_options;
 
 int  array_rope_init(volatile array_rope *, size_t);
 void array_rope_destroy(array_rope *);

@@ -54,19 +54,19 @@ typedef struct ctp_key_descriptor_s {
     ctp_key_setspecific_f set;
 } *ctp_key_descriptor;
 
-int  ctp_key_create(ctp_key *, ctp_key_dtor);
-void ctp_key_delete(ctp_key *);
+int   ctp_key_create(ctp_key *, ctp_key_dtor);
+void  ctp_key_delete(ctp_key *);
 void *ctp_key_getspecific(ctp_key);
-int  ctp_key_setspecific(ctp_key, const void *);
+int   ctp_key_setspecific(ctp_key, const void *);
 
 /*
  * Wrappers around pthread keys that have the same signature as the CTP
  * pthread key multiplexer.
  */
-int  ctp_key_pthread_create(ctp_key *, ctp_key_dtor);
-void ctp_key_pthread_delete(ctp_key *);
+int   ctp_key_pthread_create(ctp_key *, ctp_key_dtor);
+void  ctp_key_pthread_delete(ctp_key *);
 void *ctp_key_pthread_getspecific(ctp_key);
-int  ctp_key_pthread_setspecific(ctp_key, const void *);
+int   ctp_key_pthread_setspecific(ctp_key, const void *);
 
 #define CTP_OFFSETOF(type,memb) ((size_t)(uintptr_t)&((type*)0)->memb)
 #define CTP_ALIGNOF(type) CTP_OFFSETOF(struct { char c; type member; }, member)
@@ -100,7 +100,7 @@ ctp_key_of_ ## name ## _setspecific(ctp_key_of_ ## name kp,         \
 }                                                                   \
 
 #define MAKE_KEY_OF_TYPEDEF(typename)                               \
-    MAKE_KEY_OF_TYPEDEF(typename, typename)
+    MAKE_KEY_OF_TYPE(typename, typename)
 
 #ifdef __cplusplus
 }

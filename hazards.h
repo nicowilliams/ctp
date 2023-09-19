@@ -40,11 +40,12 @@ extern "C" {
 typedef void (*ctp_hazards_dtor_f)(void *);
 typedef struct ctp_hazards_s *ctp_hazards;
 
-/* Hazard pointers  */
+/* Hazard pointers (public!) */
 struct ctp_hazards_s {
+    void *app_data;
     volatile void *value;
     volatile ctp_hazards next;
-    volatile uint32_t inuse;
+    volatile uint32_t inuse; /* This should be compressed into the next ptr */
 };
 
 void ctp_hazards_gc(ctp_hazards *, void *, ctp_hazards_dtor_f);
@@ -105,7 +106,7 @@ ctp_hazards_put(ctp_hazards)                                            \
 }                                                                       \
 
 #define MAKE_HAZARDS_OF_TYPEDEF(typename)                           \
-    MAKE_HAZARDS_OF_TYPEDEF(typename, typename)
+    MAKE_HAZARDS_OF_TYPE(typename, typename)
 
 #ifdef __cplusplus
 }
